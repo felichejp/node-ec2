@@ -266,7 +266,7 @@ resource "aws_codebuild_project" "this" {
     image                       = "aws/codebuild/standard:7.0"
     type                        = "LINUX_CONTAINER"
     image_pull_credentials_type = "CODEBUILD"
-    privileged_mode             = true # Required for Docker
+    privileged_mode             = false # Buildah doesn't require privileged mode
   }
 
   source {

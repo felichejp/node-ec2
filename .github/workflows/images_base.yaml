@@ -98,20 +98,20 @@ jobs:
           CODEBUILD_TAG="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:codebuild-buildah"
           LATEST_TAG="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
           
-          echo "🔨 Building CodeBuild-Buildah image for ARM64..."
+          echo "🔨 Building CodeBuild-Buildah image for multi-architecture..."
           echo "   Version tag: $IMAGE_TAG (for reference only, not pushed to ECR)"
-          echo "🏗️ Building for ARM64 architecture (linux/arm64)..."
+          echo "🏗️ Building for both linux/amd64 and linux/arm64 architectures..."
           
-          # Build and push with both tags (codebuild-buildah and latest)
-          docker buildx build --platform linux/arm64 \
+          # Build and push with both tags (codebuild-buildah and latest) for multi-arch
+          docker buildx build --platform linux/amd64,linux/arm64 \
             -t "$CODEBUILD_TAG" \
             -t "$LATEST_TAG" \
             -f ./docker/codebuild-buildah/Dockerfile . \
             --push
           
-          echo "✅ CodeBuild-Buildah image pushed successfully with both tags!"
-          echo "   - $CODEBUILD_TAG"
-          echo "   - $LATEST_TAG"
+          echo "✅ CodeBuild-Buildah image pushed successfully with both tags and architectures!"
+          echo "   - $CODEBUILD_TAG (linux/amd64, linux/arm64)"
+          echo "   - $LATEST_TAG (linux/amd64, linux/arm64)"
 
       - name: Create and push latest Git tag
         env:

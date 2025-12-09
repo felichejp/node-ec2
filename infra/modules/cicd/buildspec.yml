@@ -63,29 +63,30 @@ phases:
         echo "Buildah Image URI: ${BUILDah_IMAGE_URI}"
         
         # Pull base image from ECR (required for build)
-        echo "Pulling base Node.js image from ECR..."
+        echo "Pulling base Node.js image from ECR for ARM64..."
         echo "Attempting to pull: ${BASE_IMAGE_URI}"
-        PULL_OUTPUT=$(buildah pull "${BASE_IMAGE_URI}" 2>&1)
+        # Try ARM64 first since we're building for ARM64
+        PULL_OUTPUT=$(buildah pull --platform linux/arm64 "${BASE_IMAGE_URI}" 2>&1)
         PULL_EXIT=$?
         if [ $PULL_EXIT -ne 0 ]; then
-          echo "WARNING: Failed to pull base image (exit code: $PULL_EXIT)"
+          echo "WARNING: Failed to pull base image with ARM64 platform (exit code: $PULL_EXIT)"
           echo "Pull output: $PULL_OUTPUT"
-          echo "Attempting to pull with ARM64 platform..."
-          PULL_OUTPUT2=$(buildah pull --platform linux/arm64 "${BASE_IMAGE_URI}" 2>&1)
+          echo "Attempting to pull without platform specification..."
+          PULL_OUTPUT2=$(buildah pull "${BASE_IMAGE_URI}" 2>&1)
           PULL_EXIT2=$?
           if [ $PULL_EXIT2 -ne 0 ]; then
-            echo "ERROR: Failed to pull base image with ARM64 (exit code: $PULL_EXIT2)"
+            echo "ERROR: Failed to pull base image (exit code: $PULL_EXIT2)"
             echo "Pull output: $PULL_OUTPUT2"
             echo "Verifying ECR authentication..."
             buildah login --get-login "${ECR_REGISTRY}" || echo "Login check failed"
             echo "Listing available images in ECR..."
             aws ecr describe-images --repository-name image-base --region "${AWS_DEFAULT_REGION}" --query 'imageDetails[*].imageTags' --output table || echo "Failed to list images"
-            echo "WARNING: Continuing build - buildah will attempt to pull during build"
+            exit 1
           else
-            echo "Base image pulled successfully with ARM64 platform"
+            echo "Base image pulled successfully (without platform specification)"
           fi
         else
-          echo "Base image pulled successfully"
+          echo "Base image pulled successfully for ARM64 platform"
         fi
         echo "Verifying base image is available..."
         buildah images | grep "image-base" || echo "Base image not in local cache"

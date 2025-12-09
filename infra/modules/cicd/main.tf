@@ -82,6 +82,27 @@ resource "aws_ecr_repository" "base_repo" {
   }
 }
 
+resource "aws_ecr_lifecycle_policy" "base_repo_policy" {
+  repository = aws_ecr_repository.base_repo.name
+
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Keep only 1 untagged image"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "imageCountMoreThan"
+          countNumber = 1
+        }
+        action = {
+          type = "expire"
+        }
+      }
+    ]
+  })
+}
+
 # CodeBuild IAM Role
 resource "aws_iam_role" "codebuild_role" {
   name = "codebuild-role"
@@ -178,8 +199,64 @@ resource "aws_codebuild_project" "this" {
   }
 
   source {
-    type      = "CODEPIPELINE"
-    buildspec = "infra/buildspec.yml" # We moved it here!
+    type = "CODEPIPELINE"
+    buildspec = yamlencode({
+      version = "0.2"
+      phases = {
+        pre_build = {
+          commands = [
+            "echo Logging in to Amazon ECR...",
+            "AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)",
+            "aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com",
+            "REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/node-backend-app",
+            "BASE_IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/node-backend-base:base-image-node22",
+            "COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)",
+            "IMAGE_TAG=$${COMMIT_HASH:=latest}"
+          ]
+        }
+        build = {
+          commands = [
+            "echo Build started on `date`",
+            "echo Building the Docker image...",
+            "docker build --build-arg BASE_IMAGE=$BASE_IMAGE_URI -t $REPOSITORY_URI:latest ./code",
+            "docker tag $REPOSITORY_URI:latest $REPOSITORY_URI:$IMAGE_TAG"
+          ]
+        }
+        post_build = {
+          commands = [
+            "echo Build completed on `date`",
+            "echo Pushing the Docker image...",
+            "docker push $REPOSITORY_URI:latest",
+            "docker push $REPOSITORY_URI:$IMAGE_TAG",
+            "echo Launching EC2 instance...",
+            "AMI_ID=$(aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --region $AWS_DEFAULT_REGION --query 'Parameters[0].Value' --output text)",
+            "echo Creating user data script...",
+            <<-EOT
+            cat > /tmp/user-data.sh << 'USERDATA'
+            #!/bin/bash
+            yum update -y
+            yum install -y docker
+            systemctl start docker
+            systemctl enable docker
+            usermod -a -G docker ec2-user
+            
+            # Get ECR login and pull image
+            AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
+            
+            # Pull and run the container
+            docker pull $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/node-backend-app:latest
+            docker run -d -p 80:8080 -p 8080:8080 --name node-app $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/node-backend-app:latest
+            USERDATA
+            EOT
+            ,
+            "echo Launching EC2 instance...",
+            "INSTANCE_ID=$(aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --user-data file:///tmp/user-data.sh --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=node-backend-app},{Key=ManagedBy,Value=CodeBuild}]' --region $AWS_DEFAULT_REGION --query 'Instances[0].InstanceId' --output text)",
+            "echo Launched EC2 instance - $INSTANCE_ID"
+          ]
+        }
+      }
+    })
   }
 }
 

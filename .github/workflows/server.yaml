@@ -26,7 +26,7 @@ jobs:
 
       - name: Zip Source Code
         run: |
-          zip -r server.zip code infra/buildspec.yml -x "code/node_modules/*" -x "code/dist/*"
+          zip -r server.zip code -x "code/node_modules/*" -x "code/dist/*"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4

@@ -4,7 +4,9 @@ on:
   push:
     tags:
       - 'base-image-node22-v*'
+      - 'base-image-node22'
       - 'base-image-net8-v*'
+      - 'base-image-net8'
 
 jobs:
   build-and-push:

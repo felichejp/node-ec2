@@ -263,7 +263,7 @@ resource "aws_codebuild_project" "this" {
 
   environment {
     compute_type                = "BUILD_GENERAL1_SMALL"
-    image                       = "${aws_ecr_repository.codebuild_buildah_repo.repository_url}:latest"
+    image                       = "${aws_ecr_repository.base_repo.repository_url}:codebuild-buildah"
     type                        = "LINUX_CONTAINER"
     image_pull_credentials_type = "SERVICE_ROLE"
     privileged_mode             = false # Buildah doesn't require privileged mode

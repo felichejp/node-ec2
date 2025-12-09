@@ -102,13 +102,14 @@ jobs:
           echo "   Version tag: $IMAGE_TAG (for reference only, not pushed to ECR)"
           echo "🏗️ Building for ARM64 architecture (linux/arm64)..."
           
-          # Build and push codebuild-buildah tag
-          docker buildx build --platform linux/arm64 -t "$CODEBUILD_TAG" -f ./docker/codebuild-buildah/Dockerfile . --push
+          # Build and push with both tags (codebuild-buildah and latest)
+          docker buildx build --platform linux/arm64 \
+            -t "$CODEBUILD_TAG" \
+            -t "$LATEST_TAG" \
+            -f ./docker/codebuild-buildah/Dockerfile . \
+            --push
           
-          # Build and push latest tag
-          docker buildx build --platform linux/arm64 -t "$LATEST_TAG" -f ./docker/codebuild-buildah/Dockerfile . --push
-          
-          echo "✅ CodeBuild-Buildah image pushed successfully!"
+          echo "✅ CodeBuild-Buildah image pushed successfully with both tags!"
           echo "   - $CODEBUILD_TAG"
           echo "   - $LATEST_TAG"
 

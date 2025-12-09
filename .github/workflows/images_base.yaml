@@ -58,11 +58,18 @@ jobs:
           DOCKERFILE: ${{ steps.determine-dockerfile.outputs.dockerfile }}
         run: |
           IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+          LATEST_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
           echo "🔨 Building image with $DOCKERFILE"
           echo "📦 Image URI: $IMAGE_URI"
           echo "🏗️ Building for ARM64 architecture (linux/arm64)..."
-          docker buildx build --platform linux/arm64 -t "$IMAGE_URI" -f "$DOCKERFILE" . --push
-          echo "✅ Image pushed successfully: $IMAGE_URI"
+          docker buildx build --platform linux/arm64 \
+            -t "$IMAGE_URI" \
+            -t "$LATEST_URI" \
+            -f "$DOCKERFILE" . \
+            --push
+          echo "✅ Image pushed successfully with both tags!"
+          echo "   - $IMAGE_URI"
+          echo "   - $LATEST_URI"
 
   build-codebuild-buildah:
     runs-on: ubuntu-latest

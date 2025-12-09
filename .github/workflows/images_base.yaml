@@ -5,6 +5,7 @@ on:
     tags:
       - 'base-image-node22-v*'
       - 'base-image-net8-v*'
+      - 'codebuild-buildah-v*'
 
 jobs:
   build-and-push:

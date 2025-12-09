@@ -1,4 +1,5 @@
 data "aws_ami" "amazon_linux_2023" {
+  count       = var.custom_ami_id == "" ? 1 : 0
   most_recent = true
   owners      = ["amazon"]
 
@@ -6,6 +7,10 @@ data "aws_ami" "amazon_linux_2023" {
     name   = "name"
     values = ["al2023-ami-*-arm64"]
   }
+}
+
+locals {
+  ami_id = var.custom_ami_id != "" ? var.custom_ami_id : data.aws_ami.amazon_linux_2023[0].id
 }
 
 resource "aws_security_group" "server_sg" {
@@ -109,7 +114,7 @@ module "ec2_instance" {
 
   name = var.instance_name
 
-  ami                    = data.aws_ami.amazon_linux_2023.id
+  ami                    = local.ami_id
   instance_type          = var.instance_type
   subnet_id              = var.subnet_id
   vpc_security_group_ids = [aws_security_group.server_sg.id]
@@ -118,32 +123,75 @@ module "ec2_instance" {
 
   iam_instance_profile = module.iam_assumable_role.iam_instance_profile_name
 
+  root_block_device = [
+    {
+      volume_type = "gp3"
+      volume_size = 20
+      encrypted   = false
+    }
+  ]
+
   user_data = base64encode(<<-EOF
     #!/bin/bash
     set -e
     
-    echo "=== Preparing EC2 instance for container runtime ==="
+    echo "=== Preparing EC2 instance ==="
+    
+    # Expand filesystem if volume was resized
+    echo "Checking and expanding filesystem if needed..."
+    if command -v growpart > /dev/null 2>&1; then
+      growpart /dev/nvme0n1 1 || true
+      if command -v xfs_growfs > /dev/null 2>&1; then
+        xfs_growfs / || true
+      elif command -v resize2fs > /dev/null 2>&1; then
+        resize2fs /dev/nvme0n1p1 || true
+      fi
+    fi
     
     # Update system
     dnf update -y || yum update -y
     
-    # Install container runtime (Podman and Docker for compatibility)
-    echo "Installing container runtime..."
-    dnf install -y podman docker || yum install -y podman docker
+    # Verify SSM Agent is running (should be preinstalled in custom AMI)
+    echo "Verifying SSM Agent..."
+    if ! systemctl is-active --quiet amazon-ssm-agent; then
+      echo "SSM Agent not running, installing..."
+      dnf install -y amazon-ssm-agent || yum install -y amazon-ssm-agent || true
+      systemctl enable amazon-ssm-agent
+      systemctl start amazon-ssm-agent
+    else
+      echo "SSM Agent is running"
+    fi
     
-    # Start and enable Docker (preferred for compatibility)
-    systemctl enable docker
-    systemctl start docker
+    # Verify Docker is installed and running (should be preinstalled in custom AMI)
+    echo "Verifying Docker..."
+    if ! command -v docker > /dev/null 2>&1; then
+      echo "Docker not found, installing..."
+      dnf install -y docker || yum install -y docker
+      systemctl enable docker
+      systemctl start docker
+      sleep 5
+    fi
     
-    # Also enable Podman as fallback
-    systemctl enable podman.socket || true
-    systemctl start podman.socket || true
+    # Ensure Docker service is running
+    if ! systemctl is-active --quiet docker; then
+      echo "Starting Docker service..."
+      systemctl enable docker
+      systemctl start docker
+      sleep 5
+    fi
     
-    # Add ec2-user to docker group
-    usermod -a -G docker ec2-user
+    # Verify Docker is working
+    if systemctl is-active --quiet docker; then
+      echo "Docker is running"
+      docker --version || echo "Docker version check failed"
+    else
+      echo "Warning: Docker service may not be running"
+    fi
     
-    # Wait for Docker to be ready
-    sleep 5
+    # Ensure ec2-user is in docker group
+    if getent group docker > /dev/null 2>&1; then
+      usermod -a -G docker ec2-user || true
+    fi
     
     echo "=== Logging into ECR ==="
     AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)

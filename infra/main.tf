@@ -32,6 +32,7 @@ module "compute" {
   instance_type = "t4g.small"
   subnet_id     = module.networking.public_subnets[0]
   vpc_id        = module.networking.vpc_id
+  custom_ami_id  = var.custom_ami_id
 }
 
 module "cicd" {

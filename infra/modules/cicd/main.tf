@@ -278,7 +278,7 @@ resource "aws_codebuild_project" "this" {
   environment {
     compute_type                = "BUILD_GENERAL1_SMALL"
     image                       = "${aws_ecr_repository.base_repo.repository_url}:codebuild-buildah"
-    type                        = "LINUX_CONTAINER"
+    type                        = "ARM_CONTAINER"
     image_pull_credentials_type = "SERVICE_ROLE"
     privileged_mode             = true # Required for Buildah in CodeBuild
   }

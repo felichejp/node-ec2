@@ -4,17 +4,41 @@ phases:
   install:
     commands:
       - echo "=== INSTALL PHASE ==="
+      - echo "Using sh (dash) for buildspec execution"
       - echo "Verifying Buildah installation..."
       - buildah --version
+      - echo "Installing qemu-user-static for cross-arch emulation..."
+      - |
+        set -e
+        if command -v apt-get >/dev/null 2>&1; then
+          apt-get update || true
+          apt-get install -y qemu-user-static binfmt-support || true
+          if [ -f /usr/bin/qemu-aarch64-static ]; then
+            cp /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64-static.bak || true
+          fi
+        elif command -v dnf >/dev/null 2>&1; then
+          dnf install -y qemu-user-static || true
+        elif command -v yum >/dev/null 2>&1; then
+          yum install -y qemu-user-static || true
+        fi
+        if command -v update-binfmts >/dev/null 2>&1; then
+          update-binfmts --enable qemu-aarch64 || true
+        fi
+        if [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+          echo "QEMU ARM64 emulation is enabled"
+        else
+          echo "Warning: QEMU ARM64 emulation may not be properly configured"
+        fi
+      - echo "qemu-user-static installation completed"
       - echo "Configuring Buildah storage..."
       - mkdir -p /etc/containers
       - |
-        cat > /etc/containers/storage.conf <<EOF
+        cat > /etc/containers/storage.conf <<'STORAGE_EOF'
         [storage]
         driver = "vfs"
         runroot = "/var/run/containers/storage"
         graphroot = "/var/lib/containers/storage"
-        EOF
+        STORAGE_EOF
       - mkdir -p /var/lib/containers/storage
       - mkdir -p /var/run/containers/storage
       - chmod 755 /var/lib/containers/storage
@@ -24,31 +48,56 @@ phases:
   pre_build:
     commands:
       - echo "=== PRE-BUILD PHASE ==="
+      - echo "Verifying CodeBuild environment (codebuild-buildah)..."
+      - buildah --version
+      - echo "CodeBuild environment verified"
       - echo "Logging in to Amazon ECR..."
       - |
+        set -e
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         export AWS_ACCOUNT_ID
         ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
         export ECR_REGISTRY
         echo "ECR Registry: ${ECR_REGISTRY}"
       - |
+        set -e
         aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | buildah login --username AWS --password-stdin "${ECR_REGISTRY}"
       - echo "ECR login successful"
       - |
+        set -e
         REPOSITORY_URI="${ECR_REGISTRY}/image-services"
         BASE_IMAGE_URI="${ECR_REGISTRY}/image-base:base-image-node22"
+        CODEBUILD_IMAGE_URI="${ECR_REGISTRY}/image-base:codebuild-buildah"
         export REPOSITORY_URI
         export BASE_IMAGE_URI
+        export CODEBUILD_IMAGE_URI
         echo "Repository URI: ${REPOSITORY_URI}"
-        echo "Base Image URI: ${BASE_IMAGE_URI}"
+        echo "Base Image URI (for application): ${BASE_IMAGE_URI}"
+        echo "CodeBuild Image URI (environment): ${CODEBUILD_IMAGE_URI}"
       - |
-        echo "Pulling base Node.js image for ARM64..."
-        buildah pull --platform linux/arm64 "${BASE_IMAGE_URI}" || {
+        set -e
+        echo "Verifying CodeBuild image exists in ECR..."
+        if ! aws ecr describe-images --repository-name image-base --image-ids imageTag=codebuild-buildah --region "${AWS_DEFAULT_REGION}" --query 'imageDetails[0].imageTags' --output text 2>/dev/null; then
+          echo "WARNING: Could not verify codebuild-buildah image in ECR"
+        fi
+      - |
+        set -e
+        echo "Pulling base Node.js image (base-image-node22) for ARM64..."
+        if ! buildah pull --platform linux/arm64 "${BASE_IMAGE_URI}"; then
           echo "ERROR: Failed to pull base image ${BASE_IMAGE_URI} for ARM64"
-          exit 1
-        }
-        echo "Base image pulled successfully"
+          echo "Attempting to pull with latest tag..."
+          LATEST_BASE_URI="${ECR_REGISTRY}/image-base:latest"
+          if ! buildah pull --platform linux/arm64 "${LATEST_BASE_URI}"; then
+            echo "ERROR: Failed to pull base image with latest tag"
+            exit 1
+          fi
+          echo "Using latest tag for base image"
+          BASE_IMAGE_URI="${LATEST_BASE_URI}"
+          export BASE_IMAGE_URI
+        fi
+        echo "Base image (base-image-node22) pulled successfully for ARM64"
       - |
+        set -e
         if [ -n "${CODEBUILD_RESOLVED_SOURCE_VERSION}" ]; then
           COMMIT_HASH=$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION}" | cut -c 1-7)
         else
@@ -61,7 +110,13 @@ phases:
   build:
     commands:
       - echo "=== BUILD PHASE ==="
+      - echo "Building application image using"
+      - echo "1. CodeBuild environment codebuild-buildah from ECR image-base"
+      - echo "2. Base image base-image-node22 from ECR image-base"
+      - echo "3. Application code from CodePipeline source zip"
+      - echo "4. Target repository image-services ECR"
       - |
+        set -e
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         export AWS_ACCOUNT_ID
         ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
@@ -83,24 +138,34 @@ phases:
         echo "Base image: ${BASE_IMAGE_URI}"
         echo "Repository: ${REPOSITORY_URI}"
         echo "Tags: server, latest, ${IMAGE_TAG}"
+        echo "Application code location: ./code"
       - |
+        set -e
         echo "Building image with buildah for ARM64..."
+        echo "Using base-image-node22 and application code from ./code"
         buildah bud --platform linux/arm64 \
           --build-arg BASE_IMAGE="${BASE_IMAGE_URI}" \
           -t "${REPOSITORY_URI}:server" \
           -f ./code/Dockerfile ./code
       - |
+        set -e
         echo "Creating additional tags..."
         buildah tag "${REPOSITORY_URI}:server" "${REPOSITORY_URI}:latest"
         buildah tag "${REPOSITORY_URI}:server" "${REPOSITORY_URI}:${IMAGE_TAG}"
       - |
+        set -e
         echo "Built images:"
-        buildah images | grep "${REPOSITORY_URI}" || echo "No images found"
+        if ! buildah images | grep -q "${REPOSITORY_URI}"; then
+          echo "No images found"
+        else
+          buildah images | grep "${REPOSITORY_URI}"
+        fi
 
   post_build:
     commands:
       - echo "=== POST-BUILD PHASE ==="
       - |
+        set -e
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         export AWS_ACCOUNT_ID
         ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
@@ -118,16 +183,20 @@ phases:
         
         echo "Pushing images to ECR..."
       - |
+        set -e
         echo "Pushing server tag..."
         buildah push "${REPOSITORY_URI}:server"
       - |
+        set -e
         echo "Pushing latest tag..."
         buildah push "${REPOSITORY_URI}:latest"
       - |
+        set -e
         echo "Pushing commit hash tag: ${IMAGE_TAG}"
         buildah push "${REPOSITORY_URI}:${IMAGE_TAG}"
       - echo "=== DEPLOYMENT PHASE ==="
       - |
+        set -e
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         export AWS_ACCOUNT_ID
         ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
@@ -156,7 +225,8 @@ phases:
           
           # Wait for SSM
           echo "Waiting for SSM to be ready..."
-          for i in $(seq 1 30); do
+          i=1
+          while [ $i -le 30 ]; do
             SSM_STATUS=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "Offline")
             if [ "${SSM_STATUS}" = "Online" ]; then
               echo "SSM is ready"
@@ -164,6 +234,7 @@ phases:
             fi
             echo "Waiting for SSM... ($i/30)"
             sleep 5
+            i=$((i + 1))
           done
           
           # Install container runtime
@@ -171,15 +242,20 @@ phases:
           PREPARE_ID=$(aws ssm send-command \
             --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["dnf install -y podman docker || yum install -y podman docker", "systemctl enable docker || systemctl enable podman", "systemctl start docker || systemctl start podman", "usermod -a -G docker ec2-user || usermod -a -G podman ec2-user"]' \
+            --parameters 'commands=["dnf install -y docker", "systemctl enable docker", "systemctl start docker", "sleep 5", "usermod -a -G docker ec2-user || true"]' \
             --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
-          sleep 10
-          aws ssm wait command-executed --command-id "${PREPARE_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" || true
+          sleep 15
+          PREPARE_OUTPUT=$(aws ssm get-command-invocation --command-id "${PREPARE_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+          PREPARE_ERROR=$(aws ssm get-command-invocation --command-id "${PREPARE_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
+          if [ -n "${PREPARE_ERROR}" ]; then
+            echo "Prepare command errors: ${PREPARE_ERROR}"
+          fi
+          echo "Docker installation output: ${PREPARE_OUTPUT}"
           
           # Login to ECR
           echo "Logging into ECR on instance..."
-          ECR_LOGIN_CMD="AWS_ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text); aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin \${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com || aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | podman login --username AWS --password-stdin \${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          ECR_LOGIN_CMD="AWS_ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text); ECR_REGISTRY=\${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com; aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin \${ECR_REGISTRY}"
           ECR_LOGIN_ID=$(aws ssm send-command \
             --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
@@ -187,54 +263,72 @@ phases:
             --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
           sleep 5
-          aws ssm wait command-executed --command-id "${ECR_LOGIN_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" || true
+          ECR_LOGIN_OUTPUT=$(aws ssm get-command-invocation --command-id "${ECR_LOGIN_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+          ECR_LOGIN_ERROR=$(aws ssm get-command-invocation --command-id "${ECR_LOGIN_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
+          if [ -n "${ECR_LOGIN_ERROR}" ]; then
+            echo "ECR login errors: ${ECR_LOGIN_ERROR}"
+          fi
+          echo "ECR login output: ${ECR_LOGIN_OUTPUT}"
           
           # Stop and remove old container
           echo "Stopping old container..."
           STOP_ID=$(aws ssm send-command \
             --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["docker stop service-app || podman stop service-app || true", "docker rm service-app || podman rm service-app || true"]' \
+            --parameters 'commands=["docker stop service-app || true", "docker rm service-app || true"]' \
             --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
           sleep 5
-          aws ssm wait command-executed --command-id "${STOP_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" || true
+          STOP_OUTPUT=$(aws ssm get-command-invocation --command-id "${STOP_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+          echo "Stop container output: ${STOP_OUTPUT}"
           
           # Pull latest image
           echo "Pulling latest server image..."
-          PULL_CMDS="docker system prune -af --volumes || podman system prune -af || true,docker pull ${REPOSITORY_URI}:server || podman pull ${REPOSITORY_URI}:server"
           PULL_ID=$(aws ssm send-command \
             --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"${PULL_CMDS}\"]" \
+            --parameters "commands=[\"df -h\", \"docker system prune -af --volumes || true\", \"docker image prune -af || true\", \"df -h\", \"docker pull ${REPOSITORY_URI}:server\"]" \
             --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
           sleep 20
-          aws ssm wait command-executed --command-id "${PULL_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" || true
+          PULL_OUTPUT=$(aws ssm get-command-invocation --command-id "${PULL_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+          PULL_ERROR=$(aws ssm get-command-invocation --command-id "${PULL_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
+          if [ -n "${PULL_ERROR}" ]; then
+            echo "Pull errors: ${PULL_ERROR}"
+          fi
+          echo "Pull output: ${PULL_OUTPUT}"
           
           # Start new container
           echo "Starting new container..."
-          START_CMD="docker run -d -p 80:8080 -p 8080:8080 --name service-app --restart unless-stopped ${REPOSITORY_URI}:server || podman run -d -p 80:8080 -p 8080:8080 --name service-app --restart unless-stopped ${REPOSITORY_URI}:server"
           START_ID=$(aws ssm send-command \
             --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"${START_CMD}\"]" \
+            --parameters "commands=[\"docker run -d -p 80:8080 -p 8080:8080 --name service-app --restart unless-stopped ${REPOSITORY_URI}:server\"]" \
             --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
           sleep 5
-          aws ssm wait command-executed --command-id "${START_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" || true
+          START_OUTPUT=$(aws ssm get-command-invocation --command-id "${START_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+          START_ERROR=$(aws ssm get-command-invocation --command-id "${START_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
+          if [ -n "${START_ERROR}" ]; then
+            echo "Start errors: ${START_ERROR}"
+          fi
+          echo "Start output: ${START_OUTPUT}"
           
           # Verify container
           echo "Verifying container..."
           VERIFY_ID=$(aws ssm send-command \
             --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["docker ps | grep service-app || podman ps | grep service-app", "docker logs --tail 10 service-app || podman logs --tail 10 service-app"]' \
+            --parameters 'commands=["docker ps | grep service-app || echo No container found", "docker logs --tail 10 service-app || echo No logs available"]' \
             --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
           sleep 5
           VERIFY_OUTPUT=$(aws ssm get-command-invocation --command-id "${VERIFY_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+          VERIFY_ERROR=$(aws ssm get-command-invocation --command-id "${VERIFY_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
           echo "Container status: ${VERIFY_OUTPUT}"
+          if [ -n "${VERIFY_ERROR}" ]; then
+            echo "Verify errors: ${VERIFY_ERROR}"
+          fi
           
           PUBLIC_IP=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
           echo "Deployment completed!"

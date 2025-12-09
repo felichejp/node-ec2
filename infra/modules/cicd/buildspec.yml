@@ -56,7 +56,7 @@ phases:
         docker run -d -p 80:8080 -p 8080:8080 --name node-app $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/node-backend-app:latest
         USERDATA
       - echo "Launching EC2 instance..."
-      - INSTANCE_ID=$(aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --subnet-id $SUBNET_ID --security-group-ids $SG_ID --associate-public-ip-address --user-data file:///tmp/user-data.sh --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=node-backend-app},{Key=ManagedBy,Value=CodeBuild}]' --region $AWS_DEFAULT_REGION --query 'Instances[0].InstanceId' --output text)
+      - INSTANCE_ID=$(aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --subnet-id $SUBNET_ID --security-group-ids $SG_ID --iam-instance-profile Name=node-backend-ec2-profile --associate-public-ip-address --user-data file:///tmp/user-data.sh --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=node-backend-app},{Key=ManagedBy,Value=CodeBuild}]' --region $AWS_DEFAULT_REGION --query 'Instances[0].InstanceId' --output text)
       - echo "Launched EC2 instance - $INSTANCE_ID"
       - PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
       - echo "Instance Public IP - $PUBLIC_IP"

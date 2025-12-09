@@ -103,6 +103,59 @@ resource "aws_ecr_lifecycle_policy" "base_repo_policy" {
   })
 }
 
+# EC2 Instance Role for ECR Access
+resource "aws_iam_role" "ec2_instance_role" {
+  name = "node-backend-ec2-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "ec2_ecr_policy" {
+  name = "ec2-ecr-policy"
+  role = aws_iam_role.ec2_instance_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "ec2_instance_profile" {
+  name = "node-backend-ec2-profile"
+  role = aws_iam_role.ec2_instance_role.name
+}
+
 # CodeBuild IAM Role
 resource "aws_iam_role" "codebuild_role" {
   name = "codebuild-role"
@@ -185,6 +238,13 @@ resource "aws_iam_role_policy" "codebuild_policy" {
           "ssm:GetParameter"
         ]
         Resource = "arn:aws:ssm:*:*:parameter/aws/service/ami-amazon-linux-latest/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole"
+        ]
+        Resource = aws_iam_role.ec2_instance_role.arn
       }
     ]
   })

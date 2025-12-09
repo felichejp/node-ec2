@@ -10,6 +10,18 @@ resource "aws_s3_bucket_versioning" "this" {
   }
 }
 
+resource "aws_s3_bucket_ownership_controls" "this" {
+  bucket = aws_s3_bucket.this.id
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_s3_bucket_notification" "bucket_notification" {
+  bucket      = aws_s3_bucket.this.id
+  eventbridge = true
+}
+
 resource "aws_s3_object" "folders" {
   for_each = toset(var.folders)
 
@@ -57,7 +69,7 @@ resource "aws_ecr_lifecycle_policy" "app_repo_policy" {
 
 resource "aws_ecr_repository" "base_repo" {
   name                 = "node-backend-base"
-  image_tag_mutability = "IMMUTABLE"
+  image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -127,6 +139,18 @@ resource "aws_iam_role_policy" "codebuild_policy" {
           "ecr:UploadLayerPart",
           "ecr:CompleteLayerUpload",
           "ecr:PutImage"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:RunInstances",
+          "ec2:DescribeInstances",
+          "ec2:DescribeImages",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeSubnets",
+          "ec2:CreateTags"
         ]
         Resource = "*"
       }

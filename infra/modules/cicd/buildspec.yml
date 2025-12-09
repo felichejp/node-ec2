@@ -3,6 +3,27 @@ version: 0.2
 phases:
   install:
     commands:
+      - echo "=== INSTALL PHASE ==="
+      - echo "Installing Buildah..."
+      - |
+        # Install buildah based on OS
+        if [ -f /etc/os-release ]; then
+          . /etc/os-release
+          if [ "$ID" = "amzn" ] || [ "$ID" = "rhel" ] || [ "$ID" = "centos" ]; then
+            # Amazon Linux / RHEL / CentOS
+            yum update -y || dnf update -y || true
+            yum install -y buildah || dnf install -y buildah || true
+          elif [ "$ID" = "ubuntu" ] || [ "$ID" = "debian" ]; then
+            # Ubuntu / Debian
+            apt-get update -y
+            apt-get install -y buildah || true
+          fi
+        else
+          # Fallback: try both package managers
+          yum install -y buildah || dnf install -y buildah || apt-get update -y && apt-get install -y buildah || true
+        fi
+      - echo "Verifying Buildah installation..."
+      - buildah --version || echo "Warning: Buildah may not be installed correctly"
       - echo "Configuring Buildah for CodeBuild..."
       - mkdir -p /etc/containers
       - |
@@ -14,70 +35,187 @@ phases:
         EOF
       - mkdir -p /var/lib/containers/storage
       - chmod 755 /var/lib/containers/storage
+      - echo "Buildah configuration completed"
+  
   pre_build:
     commands:
-      - echo Logging in to Amazon ECR...
-      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | buildah login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
-      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/image-services
-      - BASE_IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/image-base:base-image-node22
-      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
-      - IMAGE_TAG=${COMMIT_HASH:=latest}
+      - echo "=== PRE-BUILD PHASE ==="
+      - echo "Logging in to Amazon ECR..."
+      - |
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        export AWS_ACCOUNT_ID
+        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        export ECR_REGISTRY
+        echo "ECR Registry: $ECR_REGISTRY"
+      - |
+        aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | buildah login --username AWS --password-stdin "${ECR_REGISTRY}"
+      - echo "ECR login successful"
+      - |
+        # Set repository URIs
+        REPOSITORY_URI="${ECR_REGISTRY}/image-services"
+        BASE_IMAGE_URI="${ECR_REGISTRY}/image-base:base-image-node22"
+        BUILDah_IMAGE_URI="${ECR_REGISTRY}/image-base:codebuild-buildah"
+        
+        export REPOSITORY_URI
+        export BASE_IMAGE_URI
+        export BUILDah_IMAGE_URI
+        
+        echo "Repository URI: ${REPOSITORY_URI}"
+        echo "Base Image URI: ${BASE_IMAGE_URI}"
+        echo "Buildah Image URI: ${BUILDah_IMAGE_URI}"
+        
+        # Pull base image from ECR
+        echo "Pulling base Node.js image from ECR..."
+        buildah pull "${BASE_IMAGE_URI}" || echo "Warning: Could not pull base image, will use FROM in Dockerfile"
+        
+        # Get commit hash for tagging
+        if [ -n "${CODEBUILD_RESOLVED_SOURCE_VERSION}" ]; then
+          COMMIT_HASH=$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION}" | cut -c 1-7)
+        else
+          COMMIT_HASH="latest"
+        fi
+        IMAGE_TAG="${COMMIT_HASH}"
+        export IMAGE_TAG
+        echo "Commit hash: ${COMMIT_HASH}"
+        echo "Image tag: ${IMAGE_TAG}"
+  
   build:
     commands:
-      - echo Build started on `date`
-      - echo Building the Docker image with Buildah...
-      - buildah bud --build-arg BASE_IMAGE=$BASE_IMAGE_URI -t $REPOSITORY_URI:latest -f ./code/Dockerfile ./code
-      - echo "Creating additional tag with commit hash..."
-      - buildah tag $REPOSITORY_URI:latest $REPOSITORY_URI:$IMAGE_TAG
+      - echo "=== BUILD PHASE ==="
+      - |
+        echo "Build started on $(date)"
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        export AWS_ACCOUNT_ID
+        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        export ECR_REGISTRY
+        REPOSITORY_URI="${ECR_REGISTRY}/image-services"
+        export REPOSITORY_URI
+        BASE_IMAGE_URI="${ECR_REGISTRY}/image-base:base-image-node22"
+        export BASE_IMAGE_URI
+        
+        if [ -n "${CODEBUILD_RESOLVED_SOURCE_VERSION}" ]; then
+          COMMIT_HASH=$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION}" | cut -c 1-7)
+        else
+          COMMIT_HASH="latest"
+        fi
+        IMAGE_TAG="${COMMIT_HASH}"
+        export IMAGE_TAG
+        
+        echo "Building container image with Buildah..."
+        echo "Using base image: ${BASE_IMAGE_URI}"
+        echo "Building for ARM64 architecture (linux/arm64)..."
+        echo "Repository URI: ${REPOSITORY_URI}"
+        echo "Image tag: ${IMAGE_TAG}"
+      
+      # Build the image with buildah, specifying ARM64 platform
+      - |
+        buildah bud --platform linux/arm64 --build-arg BASE_IMAGE="${BASE_IMAGE_URI}" -t "${REPOSITORY_URI}:server" -f ./code/Dockerfile ./code
+      
+      - echo "Image built successfully"
+      - echo "Creating additional tags..."
+      
+      # Tag as latest
+      - |
+        buildah tag "${REPOSITORY_URI}:server" "${REPOSITORY_URI}:latest"
+      
+      # Tag with commit hash
+      - |
+        buildah tag "${REPOSITORY_URI}:server" "${REPOSITORY_URI}:${IMAGE_TAG}"
+      
       - echo "Image tags created:"
-      - 'buildah images | grep "$REPOSITORY_URI"'
-      - echo "Verifying latest tag exists..."
-      - 'buildah images | grep "latest"'
+      - |
+        buildah images | grep "${REPOSITORY_URI}" || echo "No images found matching ${REPOSITORY_URI}"
+      - echo "Verifying tags..."
+      - |
+        buildah images | grep -E "(server|latest)" || echo "No tags found"
+  
   post_build:
     commands:
-      - echo Build completed on `date`
-      - echo Pushing the image with Buildah...
-      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/image-services
+      - echo "=== POST-BUILD PHASE ==="
+      - |
+        echo "Build completed on $(date)"
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        export AWS_ACCOUNT_ID
+        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        export ECR_REGISTRY
+        REPOSITORY_URI="${ECR_REGISTRY}/image-services"
+        export REPOSITORY_URI
+        
+        if [ -n "${CODEBUILD_RESOLVED_SOURCE_VERSION}" ]; then
+          COMMIT_HASH=$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION}" | cut -c 1-7)
+        else
+          COMMIT_HASH="latest"
+        fi
+        IMAGE_TAG="${COMMIT_HASH}"
+        export IMAGE_TAG
+        
+        echo "Pushing images to ECR..."
+        echo "Repository URI: ${REPOSITORY_URI}"
+        echo "Image tag: ${IMAGE_TAG}"
+      
       - echo "Listing images before push..."
-      - 'buildah images | grep "$REPOSITORY_URI"'
-      - echo "Pushing commit hash tag first..."
-      - buildah push $REPOSITORY_URI:$IMAGE_TAG
-      - echo "Re-tagging with latest tag to ensure it points to the same image..."
-      - buildah tag $REPOSITORY_URI:$IMAGE_TAG $REPOSITORY_URI:latest
-      - echo "Pushing latest tag (most recent - this will replace previous latest)..."
-      - buildah push $REPOSITORY_URI:latest
-      - echo "Verifying latest tag was pushed to ECR..."
-      - sleep 2
-      - aws ecr describe-images --repository-name image-services --image-ids imageTag=latest --region $AWS_DEFAULT_REGION --query 'imageDetails[0].imageTags' --output text
+      - |
+        buildah images | grep "${REPOSITORY_URI}" || echo "No images found matching ${REPOSITORY_URI}"
+      
+      # Push commit hash tag first
+      - |
+        echo "Pushing commit hash tag: ${IMAGE_TAG}"
+        buildah push "${REPOSITORY_URI}:${IMAGE_TAG}"
+      
+      # Push server tag
+      - |
+        echo "Pushing server tag..."
+        buildah push "${REPOSITORY_URI}:server"
+      
+      # Push latest tag (this will replace previous latest)
+      - |
+        echo "Pushing latest tag..."
+        buildah push "${REPOSITORY_URI}:latest"
+      
+      - echo "Verifying tags were pushed to ECR..."
+      - sleep 3
+      - |
+        aws ecr describe-images --repository-name image-services --image-ids imageTag=server --region "${AWS_DEFAULT_REGION}" --query 'imageDetails[0].imageTags' --output text || echo "Warning: Could not verify server tag"
+      - |
+        aws ecr describe-images --repository-name image-services --image-ids imageTag=latest --region "${AWS_DEFAULT_REGION}" --query 'imageDetails[0].imageTags' --output text || echo "Warning: Could not verify latest tag"
+      
+      - echo "=== DEPLOYMENT PHASE ==="
       - echo "Checking for existing EC2 instance named 'server'..."
       - |
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-        REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/image-services
+        export AWS_ACCOUNT_ID
+        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        export ECR_REGISTRY
+        REPOSITORY_URI="${ECR_REGISTRY}/image-services"
+        export REPOSITORY_URI
         
         echo "Looking for existing instance with name 'server'..."
-        INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=server" "Name=instance-state-name,Values=running,stopped,stopping" --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || echo "")
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=server" "Name=instance-state-name,Values=running,stopped,stopping" \
+          --region "${AWS_DEFAULT_REGION}" \
+          --query 'Reservations[0].Instances[0].InstanceId' \
+          --output text 2>/dev/null || echo "")
         
-        if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ] && [ "$INSTANCE_ID" != "null" ] && [ "$INSTANCE_ID" != "none" ]; then
-          echo "Found existing instance: $INSTANCE_ID"
+        if [ -n "${INSTANCE_ID}" ] && [ "${INSTANCE_ID}" != "None" ] && [ "${INSTANCE_ID}" != "null" ] && [ "${INSTANCE_ID}" != "none" ]; then
+          echo "Found existing instance: ${INSTANCE_ID}"
           echo "Updating container on existing instance..."
           
           # Wait for instance to be running if it's stopped
-          INSTANCE_STATE=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].State.Name' --output text)
-          if [ "$INSTANCE_STATE" = "stopped" ]; then
+          INSTANCE_STATE=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'Reservations[0].Instances[0].State.Name' --output text)
+          if [ "${INSTANCE_STATE}" = "stopped" ]; then
             echo "Starting stopped instance..."
-            aws ec2 start-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION
+            aws ec2 start-instances --instance-ids "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}"
             echo "Waiting for instance to be running..."
-            aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION
+            aws ec2 wait instance-running --instance-ids "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}"
             echo "Waiting for SSM agent to be ready..."
             sleep 30
           fi
           
           # Wait for SSM to be ready
           echo "Waiting for SSM to be ready..."
-          for i in {1..30}; do
-            if aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$INSTANCE_ID" --region $AWS_DEFAULT_REGION --query 'InstanceInformationList[0].PingStatus' --output text | grep -q "Online"; then
+          for i in $(seq 1 30); do
+            SSM_STATUS=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "Offline")
+            if [ "${SSM_STATUS}" = "Online" ]; then
               echo "SSM is ready"
               break
             fi
@@ -85,214 +223,117 @@ phases:
             sleep 5
           done
           
-          # Update container using SSM
-          # Step 1: Login to ECR
-          echo "Logging into ECR..."
-          ECR_LOGIN_ID=$(aws ssm send-command \
-            --instance-ids $INSTANCE_ID \
+          # Prepare instance for container runtime (Podman or Docker)
+          echo "Preparing instance for container runtime..."
+          PREPARE_ID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"AWS_ACCOUNT_ID=\\\$(aws sts get-caller-identity --query Account --output text)\", \"aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin \\\$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com\"]" \
-            --region $AWS_DEFAULT_REGION \
+            --parameters commands="echo Installing container runtime...,dnf install -y podman docker || yum install -y podman docker,systemctl enable docker || systemctl enable podman,systemctl start docker || systemctl start podman,usermod -a -G docker ec2-user || usermod -a -G podman ec2-user,echo Container runtime installed and started" \
+            --region "${AWS_DEFAULT_REGION}" \
+            --query 'Command.CommandId' --output text)
+          
+          sleep 10
+          aws ssm wait command-executed --command-id "${PREPARE_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" || true
+          
+          # Step 1: Login to ECR
+          echo "Logging into ECR on instance..."
+          ECR_LOGIN_CMD="AWS_ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text); aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin \${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com || aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | podman login --username AWS --password-stdin \${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          ECR_LOGIN_ID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"${ECR_LOGIN_CMD}\"]" \
+            --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
           
           sleep 5
-          aws ssm wait command-executed --command-id $ECR_LOGIN_ID --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION || true
+          aws ssm wait command-executed --command-id "${ECR_LOGIN_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" || true
           
           # Step 2: Remove old container/image and pull latest image (force update)
-          echo "Removing old image and pulling latest image: $REPOSITORY_URI:latest"
+          echo "Removing old container and pulling latest image: ${REPOSITORY_URI}:server"
+          PULL_CMDS="docker stop service-app || podman stop service-app || true,docker rm service-app || podman rm service-app || true,IMAGES=\$(docker images ${REPOSITORY_URI} -q 2>/dev/null || podman images ${REPOSITORY_URI} -q 2>/dev/null); if [ -n \"\${IMAGES}\" ]; then echo \${IMAGES} | xargs docker rmi -f 2>/dev/null || echo \${IMAGES} | xargs podman rmi -f 2>/dev/null; fi,docker system prune -af --volumes || podman system prune -af || true,echo Pulling server image from ECR (ARM64)...,docker pull ${REPOSITORY_URI}:server || podman pull ${REPOSITORY_URI}:server,echo Image pull completed"
           PULL_ID=$(aws ssm send-command \
-            --instance-ids $INSTANCE_ID \
+            --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"docker stop service-app || true\", \"docker rm service-app || true\", \"IMAGES=\\\$(docker images $REPOSITORY_URI -q); if [ -n \\\"\\\$IMAGES\\\" ]; then echo \\\$IMAGES | xargs docker rmi -f; fi\", \"docker system prune -af --volumes || true\", \"echo Pulling latest image from ECR (this will download if digest changed)...\", \"docker pull $REPOSITORY_URI:latest\", \"echo Image pull completed\"]" \
-            --region $AWS_DEFAULT_REGION \
+            --parameters "commands=[\"${PULL_CMDS}\"]" \
+            --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
           
           sleep 20
-          aws ssm wait command-executed --command-id $PULL_ID --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION || true
-          PULL_OUTPUT=$(aws ssm get-command-invocation --command-id $PULL_ID --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
-          PULL_ERROR=$(aws ssm get-command-invocation --command-id $PULL_ID --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
-          echo "Pull output: $PULL_OUTPUT"
-          # Only show errors if they're not the expected "No such image" error from docker rmi
-          if [ -n "$PULL_ERROR" ] && ! echo "$PULL_ERROR" | grep -q "No such image"; then
-            echo "Pull errors: $PULL_ERROR"
+          aws ssm wait command-executed --command-id "${PULL_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" || true
+          PULL_OUTPUT=$(aws ssm get-command-invocation --command-id "${PULL_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+          PULL_ERROR=$(aws ssm get-command-invocation --command-id "${PULL_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
+          echo "Pull output: ${PULL_OUTPUT}"
+          if [ -n "${PULL_ERROR}" ] && ! echo "${PULL_ERROR}" | grep -qE "(No such image|not found)"; then
+            echo "Pull errors: ${PULL_ERROR}"
           fi
           
-          # Verify image was pulled and show image details
-          echo "Verifying latest image exists and showing details..."
+          # Verify image was pulled
+          echo "Verifying server image exists..."
+          IMAGE_CHECK_CMD="docker images ${REPOSITORY_URI}:server --format 'Repository: {{.Repository}}, Tag: {{.Tag}}, ImageID: {{.ID}}' || podman images ${REPOSITORY_URI}:server --format '{{.Repository}} {{.Tag}} {{.ID}}'"
           IMAGE_CHECK_ID=$(aws ssm send-command \
-            --instance-ids $INSTANCE_ID \
+            --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"docker images $REPOSITORY_URI:latest --format 'Repository: {{.Repository}}, Tag: {{.Tag}}, ImageID: {{.ID}}, Created: {{.CreatedAt}}'\", \"docker inspect $REPOSITORY_URI:latest --format 'Image Digest: {{.RepoDigests}}' || echo No digest available\"]" \
-            --region $AWS_DEFAULT_REGION \
+            --parameters "commands=[\"${IMAGE_CHECK_CMD}\"]" \
+            --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
           
           sleep 5
-          IMAGE_CHECK=$(aws ssm get-command-invocation --command-id $IMAGE_CHECK_ID --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
-          echo "Image details: $IMAGE_CHECK"
+          IMAGE_CHECK=$(aws ssm get-command-invocation --command-id "${IMAGE_CHECK_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+          echo "Image details: ${IMAGE_CHECK}"
           
-          # Step 3: Start new container with latest image
-          echo "Starting new container with latest image..."
+          # Step 3: Start new container with server image
+          echo "Starting new container with server image..."
+          START_CMD="docker run -d -p 80:8080 -p 8080:8080 --name service-app --restart unless-stopped ${REPOSITORY_URI}:server || podman run -d -p 80:8080 -p 8080:8080 --name service-app --restart unless-stopped ${REPOSITORY_URI}:server"
           START_ID=$(aws ssm send-command \
-            --instance-ids $INSTANCE_ID \
+            --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"docker run -d -p 80:8080 -p 8080:8080 --name service-app --restart unless-stopped $REPOSITORY_URI:latest\"]" \
-            --region $AWS_DEFAULT_REGION \
+            --parameters "commands=[\"${START_CMD}\"]" \
+            --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
           
           sleep 5
-          aws ssm wait command-executed --command-id $START_ID --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION || true
-          START_OUTPUT=$(aws ssm get-command-invocation --command-id $START_ID --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
-          START_ERROR=$(aws ssm get-command-invocation --command-id $START_ID --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
-          echo "Start output: $START_OUTPUT"
-          if [ -n "$START_ERROR" ]; then
-            echo "Start errors: $START_ERROR"
+          aws ssm wait command-executed --command-id "${START_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" || true
+          START_OUTPUT=$(aws ssm get-command-invocation --command-id "${START_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+          START_ERROR=$(aws ssm get-command-invocation --command-id "${START_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
+          echo "Start output: ${START_OUTPUT}"
+          if [ -n "${START_ERROR}" ]; then
+            echo "Start errors: ${START_ERROR}"
           fi
           
           # Verify container is running
           echo "Verifying container is running..."
           sleep 5
+          VERIFY_CMDS="docker ps | grep service-app || podman ps | grep service-app,docker logs --tail 20 service-app || podman logs --tail 20 service-app"
           VERIFY_ID=$(aws ssm send-command \
-            --instance-ids $INSTANCE_ID \
+            --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["docker ps | grep service-app", "docker logs --tail 20 service-app"]' \
-            --region $AWS_DEFAULT_REGION \
+            --parameters "commands=[\"${VERIFY_CMDS}\"]" \
+            --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
           
           sleep 5
-          VERIFY_OUTPUT=$(aws ssm get-command-invocation --command-id $VERIFY_ID --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
-          echo "Container status: $VERIFY_OUTPUT"
+          VERIFY_OUTPUT=$(aws ssm get-command-invocation --command-id "${VERIFY_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+          echo "Container status: ${VERIFY_OUTPUT}"
           
           # Health check
           echo "Performing health check..."
           sleep 3
           HEALTH_ID=$(aws ssm send-command \
-            --instance-ids $INSTANCE_ID \
+            --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
             --parameters 'commands=["curl -f http://localhost:8080/status || echo Health check failed"]' \
-            --region $AWS_DEFAULT_REGION \
+            --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
           
           sleep 3
-          HEALTH_OUTPUT=$(aws ssm get-command-invocation --command-id $HEALTH_ID --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
-          echo "Health check: $HEALTH_OUTPUT"
+          HEALTH_OUTPUT=$(aws ssm get-command-invocation --command-id "${HEALTH_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+          echo "Health check: ${HEALTH_OUTPUT}"
           
-          PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-          echo "Updated existing instance: $INSTANCE_ID"
-          echo "Instance Public IP - $PUBLIC_IP"
-          echo "Application will be available at http://$PUBLIC_IP:80 and http://$PUBLIC_IP:8080"
+          PUBLIC_IP=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          echo "Updated existing instance: ${INSTANCE_ID}"
+          echo "Instance Public IP - ${PUBLIC_IP}"
+          echo "Application will be available at http://${PUBLIC_IP}:80 and http://${PUBLIC_IP}:8080"
         else
-          echo "No existing instance found. Creating new instance named 'server'..."
-          AMI_ID=$(aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --region $AWS_DEFAULT_REGION --query 'Parameters[0].Value' --output text 2>/dev/null || echo "")
-          
-          if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "None" ] || [ "$AMI_ID" = "null" ]; then
-            echo "ERROR: Failed to get AMI ID!"
-            exit 1
-          fi
-          
-          echo "Using VPC created by Terraform..."
-          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=eks-vpc" --region $AWS_DEFAULT_REGION --query 'Vpcs[0].VpcId' --output text 2>/dev/null || echo "")
-          echo "VPC ID - $VPC_ID"
-          
-          if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ] || [ "$VPC_ID" = "null" ]; then
-            echo "ERROR: VPC not found!"
-            exit 1
-          fi
-          
-          echo "Getting first available subnet..."
-          SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --region $AWS_DEFAULT_REGION --query 'Subnets[0].SubnetId' --output text 2>/dev/null || echo "")
-          echo "Subnet ID - $SUBNET_ID"
-          
-          if [ -z "$SUBNET_ID" ] || [ "$SUBNET_ID" = "None" ] || [ "$SUBNET_ID" = "null" ]; then
-            echo "ERROR: No subnets found in VPC!"
-            exit 1
-          fi
-          
-          echo "Checking for existing security group..."
-          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=server-sg" "Name=vpc-id,Values=$VPC_ID" --region $AWS_DEFAULT_REGION --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "")
-          
-          # Check if SG_ID is empty or "None" (AWS CLI returns "None" as string when not found)
-          # Also verify it's a valid security group ID (starts with "sg-")
-          SG_VALID=$(echo "$SG_ID" | grep -c "^sg-" || echo "0")
-          if [ -z "$SG_ID" ] || [ "$SG_ID" = "None" ] || [ "$SG_ID" = "null" ] || [ "$SG_ID" = "none" ] || [ "$SG_VALID" = "0" ]; then
-            echo "Security group not found or invalid. Creating new one..."
-            SG_ID=$(aws ec2 create-security-group --group-name server-sg --description "Security group for server instance" --vpc-id $VPC_ID --region $AWS_DEFAULT_REGION --query 'GroupId' --output text 2>/dev/null || echo "")
-            
-            SG_VALID=$(echo "$SG_ID" | grep -c "^sg-" || echo "0")
-            if [ -z "$SG_ID" ] || [ "$SG_ID" = "None" ] || [ "$SG_ID" = "null" ] || [ "$SG_ID" = "none" ] || [ "$SG_VALID" = "0" ]; then
-              echo "ERROR: Failed to create security group! Got: '$SG_ID'"
-              exit 1
-            fi
-            
-            echo "Security Group ID - $SG_ID"
-            echo "Adding ingress rules..."
-            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION 2>/dev/null || true
-            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 8080 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION 2>/dev/null || true
-            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 22 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION 2>/dev/null || true
-          else
-            echo "Using existing security group: $SG_ID"
-          fi
-          
-          echo "Creating user data script..."
-          echo '#!/bin/bash' > /tmp/user-data.sh
-          echo 'yum update -y' >> /tmp/user-data.sh
-          echo 'yum install -y docker' >> /tmp/user-data.sh
-          echo 'systemctl start docker' >> /tmp/user-data.sh
-          echo 'systemctl enable docker' >> /tmp/user-data.sh
-          echo 'usermod -a -G docker ec2-user' >> /tmp/user-data.sh
-          echo '' >> /tmp/user-data.sh
-          echo '# Get ECR login and pull image' >> /tmp/user-data.sh
-          echo 'AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)' >> /tmp/user-data.sh
-          echo 'aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com' >> /tmp/user-data.sh
-          echo '' >> /tmp/user-data.sh
-          echo '# Pull and run the container' >> /tmp/user-data.sh
-          echo 'docker pull $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/image-services:latest' >> /tmp/user-data.sh
-          echo 'docker run -d -p 80:8080 -p 8080:8080 --name service-app --restart unless-stopped $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/image-services:latest' >> /tmp/user-data.sh
-          
-          if [ ! -f /tmp/user-data.sh ]; then
-            echo "ERROR: Failed to create user-data.sh file!"
-            exit 1
-          fi
-          
-          echo "User data script created successfully"
-          echo "Launching EC2 instance..."
-          echo "Debug info - AMI_ID: $AMI_ID"
-          echo "Debug info - SUBNET_ID: $SUBNET_ID"
-          echo "Debug info - SG_ID: $SG_ID"
-          echo "Debug info - Region: $AWS_DEFAULT_REGION"
-          
-          # Launch instance and capture both stdout and stderr
-          INSTANCE_OUTPUT=$(aws ec2 run-instances \
-            --image-id "$AMI_ID" \
-            --instance-type t3.micro \
-            --subnet-id "$SUBNET_ID" \
-            --security-group-ids "$SG_ID" \
-            --iam-instance-profile Name=node-backend-ec2-profile \
-            --associate-public-ip-address \
-            --user-data file:///tmp/user-data.sh \
-            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=server},{Key=ManagedBy,Value=CodeBuild}]" \
-            --region "$AWS_DEFAULT_REGION" \
-            --query 'Instances[0].InstanceId' \
-            --output text 2>&1)
-          EXIT_CODE=$?
-          
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "ERROR: Failed to launch EC2 instance (exit code: $EXIT_CODE)!"
-            echo "Error output: $INSTANCE_OUTPUT"
-            exit 1
-          fi
-          
-          INSTANCE_ID="$INSTANCE_OUTPUT"
-          
-          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ] || [ "$INSTANCE_ID" = "null" ] || [ "$INSTANCE_ID" = "none" ]; then
-            echo "ERROR: Instance ID is empty or invalid!"
-            echo "Received: '$INSTANCE_ID'"
-            echo "Full output: $INSTANCE_OUTPUT"
-            exit 1
-          fi
-          
-          echo "Launched EC2 instance - $INSTANCE_ID"
-          sleep 5
-          PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].PublicIpAddress' --output text 2>/dev/null || echo "")
-          echo "Instance Public IP - $PUBLIC_IP"
-          echo "Application will be available at http://$PUBLIC_IP:80 and http://$PUBLIC_IP:8080"
+          echo "No existing instance found. Instance should be created by Terraform module 'compute'."
+          echo "The instance will be created with name 'server' and will pull the image on first boot via user-data."
         fi

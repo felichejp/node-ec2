@@ -1,6 +1,7 @@
 # S3 Resources
 resource "aws_s3_bucket" "this" {
-  bucket = var.bucket_name
+  bucket        = var.bucket_name
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_versioning" "this" {
@@ -34,6 +35,7 @@ resource "aws_s3_object" "folders" {
 resource "aws_ecr_repository" "app_repo" {
   name                 = "image-services"
   image_tag_mutability = "MUTABLE"
+  force_delete         = true
 
   image_scanning_configuration {
     scan_on_push = true
@@ -70,6 +72,7 @@ resource "aws_ecr_lifecycle_policy" "app_repo_policy" {
 resource "aws_ecr_repository" "base_repo" {
   name                 = "image-base"
   image_tag_mutability = "MUTABLE"
+  force_delete         = true
 
   image_scanning_configuration {
     scan_on_push = true
@@ -274,9 +277,9 @@ resource "aws_codebuild_project" "this" {
 
   environment {
     compute_type                = "BUILD_GENERAL1_SMALL"
-    image                       = "${aws_ecr_repository.base_repo.repository_url}:codebuild-buildah"
+    image                       = "aws/codebuild/standard:7.0"
     type                        = "LINUX_CONTAINER"
-    image_pull_credentials_type = "SERVICE_ROLE"
+    image_pull_credentials_type = "CODEBUILD"
     privileged_mode             = true # Required for Buildah in CodeBuild
   }
 

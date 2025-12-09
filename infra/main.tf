@@ -25,14 +25,14 @@ module "networking" {
 #   db_password         = var.db_password
 # }
 
-# module "compute" {
-#   source = "./modules/compute"
+module "compute" {
+  source = "./modules/compute"
 
-#   instance_name      = var.instance_name
-#   instance_type      = var.instance_type
-#   subnet_id          = module.networking.private_subnets[0]
-#   security_group_ids = [module.database.security_group_id]
-# }
+  instance_name = "server"
+  instance_type = "t4g.small"
+  subnet_id     = module.networking.public_subnets[0]
+  vpc_id        = module.networking.vpc_id
+}
 
 module "cicd" {
   source = "./modules/cicd"

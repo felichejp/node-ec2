@@ -7,77 +7,78 @@ on:
       - 'base-image-net8-v*'
       - 'codebuild-buildah-v*'
 
+env:
+  ECR_REPOSITORY: image-base
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+
 jobs:
-  build-and-push:
+  build-base-images:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/base-image-')
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ secrets.AWS_REGION }}
-
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
-
-    - name: Determine Dockerfile and Image Tag
-      id: determine-dockerfile
-      env:
-        IMAGE_TAG: ${{ github.ref_name }}
-      run: |
-        # Determine Dockerfile based on tag
-        if [[ "$IMAGE_TAG" == "base-image-node22-"* ]]; then
-          echo "dockerfile=Docker-Images/Dockerfile.node22-prod" >> $GITHUB_OUTPUT
-          echo "ecr_tag=base-image-node22" >> $GITHUB_OUTPUT
-          echo "Selected Node 22 Prod Dockerfile"
-        elif [[ "$IMAGE_TAG" == "base-image-net8-"* ]]; then
-          echo "dockerfile=Docker-Images/Dockerfile.net8.0-prod" >> $GITHUB_OUTPUT
-          echo "ecr_tag=base-image-net8" >> $GITHUB_OUTPUT
-          echo "Selected .NET 8 Prod Dockerfile"
-        else
-          echo "Error: Unknown tag format"
-          exit 1
-        fi
-
-    - name: Build and Push Image
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        ECR_REPOSITORY: node-backend-base
-        ECR_TAG: ${{ steps.determine-dockerfile.outputs.ecr_tag }}
-        DOCKERFILE: ${{ steps.determine-dockerfile.outputs.dockerfile }}
-      run: |
-        echo "Building with $DOCKERFILE"
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$ECR_TAG -f $DOCKERFILE .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$ECR_TAG
-
-  build-codebuild-buildah:
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/codebuild-buildah')
-    
-    steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Extract version from tag
-        id: get_version
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
-          echo "Building CodeBuild-Buildah image with tag: $TAG_NAME"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Determine Dockerfile and Image Tag
+        id: determine-dockerfile
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          if [[ "$TAG_NAME" == "base-image-node22-"* ]]; then
+            echo "dockerfile=Docker-Images/Dockerfile.node22-prod" >> $GITHUB_OUTPUT
+            echo "ecr_tag=base-image-node22" >> $GITHUB_OUTPUT
+            echo "✅ Selected Node 22 Prod Dockerfile"
+          elif [[ "$TAG_NAME" == "base-image-net8-"* ]]; then
+            echo "dockerfile=Docker-Images/Dockerfile.net8.0-prod" >> $GITHUB_OUTPUT
+            echo "ecr_tag=base-image-net8" >> $GITHUB_OUTPUT
+            echo "✅ Selected .NET 8 Prod Dockerfile"
+          else
+            echo "❌ Error: Unknown tag format: $TAG_NAME"
+            exit 1
+          fi
+
+      - name: Build and Push Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.determine-dockerfile.outputs.ecr_tag }}
+          DOCKERFILE: ${{ steps.determine-dockerfile.outputs.dockerfile }}
+        run: |
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+          echo "🔨 Building image with $DOCKERFILE"
+          echo "📦 Image URI: $IMAGE_URI"
+          docker build -t "$IMAGE_URI" -f "$DOCKERFILE" .
+          docker push "$IMAGE_URI"
+          echo "✅ Image pushed successfully: $IMAGE_URI"
+
+  build-codebuild-buildah:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/codebuild-buildah')
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -86,19 +87,64 @@ jobs:
       - name: Build and push CodeBuild-Buildah image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: image-base
-          IMAGE_TAG: ${{ steps.get_version.outputs.tag }}
+          IMAGE_TAG: ${{ github.ref_name }}
         run: |
-          echo "Building CodeBuild-Buildah image..."
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./docker/codebuild-buildah
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:codebuild-buildah
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+          CODEBUILD_TAG="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:codebuild-buildah"
+          LATEST_TAG="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
           
-          echo "Pushing versioned tag: $IMAGE_TAG"
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "🔨 Building CodeBuild-Buildah image..."
+          docker build -t "$IMAGE_URI" ./docker/codebuild-buildah
           
-          echo "Pushing codebuild-buildah tag"
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:codebuild-buildah
+          # Tag with codebuild-buildah
+          docker tag "$IMAGE_URI" "$CODEBUILD_TAG"
+          
+          # Tag with latest
+          docker tag "$IMAGE_URI" "$LATEST_TAG"
+          
+          echo "📤 Pushing versioned tag: $IMAGE_TAG"
+          docker push "$IMAGE_URI"
+          
+          echo "📤 Pushing codebuild-buildah tag"
+          docker push "$CODEBUILD_TAG"
+          
+          echo "📤 Pushing latest tag"
+          docker push "$LATEST_TAG"
           
           echo "✅ CodeBuild-Buildah image pushed successfully!"
-          echo "  - $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          echo "  - $ECR_REGISTRY/$ECR_REPOSITORY:codebuild-buildah"
+          echo "   - $IMAGE_URI"
+          echo "   - $CODEBUILD_TAG"
+          echo "   - $LATEST_TAG"
+
+      - name: Create and push latest Git tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          GIT_TAG="codebuild-buildah-latest"
+          COMMIT_SHA="${{ github.sha }}"
+          VERSION_TAG="${{ github.ref_name }}"
+          
+          echo "🏷️  Updating Git tag: $GIT_TAG"
+          echo "   Previous version: $VERSION_TAG"
+          echo "   Commit SHA: $COMMIT_SHA"
+          
+          # Configure Git user (required for tag creation)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Delete existing latest tag if it exists (local and remote)
+          echo "🗑️  Removing existing tag if present..."
+          git tag -d "$GIT_TAG" 2>/dev/null || echo "   No local tag to delete"
+          git push origin ":refs/tags/$GIT_TAG" 2>/dev/null || echo "   No remote tag to delete"
+          
+          # Create new latest tag pointing to current commit
+          echo "✨ Creating new tag: $GIT_TAG"
+          git tag -a "$GIT_TAG" -m "Latest CodeBuild-Buildah image (from $VERSION_TAG)" "$COMMIT_SHA"
+          
+          # Force push the tag to GitHub (replaces any existing tag)
+          echo "📤 Pushing tag to GitHub (force update)..."
+          git push origin "$GIT_TAG" --force
+          
+          echo "✅ Git tag '$GIT_TAG' updated successfully!"
+          echo "   Tag now points to: $COMMIT_SHA"
+          echo "   Version: $VERSION_TAG"

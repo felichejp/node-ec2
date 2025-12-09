@@ -13,7 +13,7 @@ variable "subnet_id" {
   description = "The subnet ID to launch the instance in"
 }
 
-variable "security_group_ids" {
-  type        = list(string)
-  description = "List of security group IDs"
+variable "vpc_id" {
+  type        = string
+  description = "The VPC ID where the security group will be created"
 }

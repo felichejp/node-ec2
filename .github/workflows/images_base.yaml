@@ -89,6 +89,9 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
 
       - name: Build and push CodeBuild-Buildah image
         env:
@@ -102,16 +105,25 @@ jobs:
           echo "   Version tag: $IMAGE_TAG (for reference only, not pushed to ECR)"
           echo "🏗️ Building for both linux/amd64 and linux/arm64 architectures..."
           
+          # Verify buildx is ready
+          docker buildx inspect --bootstrap
+          
           # Build and push with both tags (codebuild-buildah and latest) for multi-arch
           docker buildx build --platform linux/amd64,linux/arm64 \
             -t "$CODEBUILD_TAG" \
             -t "$LATEST_TAG" \
             -f ./docker/codebuild-buildah/Dockerfile . \
-            --push
+            --push \
+            --provenance=false \
+            --sbom=false
           
           echo "✅ CodeBuild-Buildah image pushed successfully with both tags and architectures!"
           echo "   - $CODEBUILD_TAG (linux/amd64, linux/arm64)"
           echo "   - $LATEST_TAG (linux/amd64, linux/arm64)"
+          
+          # Verify the manifest
+          echo "📋 Verifying multi-arch manifest..."
+          docker buildx imagetools inspect "$CODEBUILD_TAG" || echo "Warning: Could not inspect manifest"
 
       - name: Create and push latest Git tag
         env:

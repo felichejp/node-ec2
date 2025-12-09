@@ -1,20 +1,18 @@
+ARG BASE_IMAGE=public.ecr.aws/docker/library/node:22-slim
+
 # Build stage
-FROM public.ecr.aws/docker/library/node:22-slim AS builder
+FROM ${BASE_IMAGE} AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
-COPY . .
+COPY tsconfig.json ./
+COPY src ./src
 RUN npm run build
 
 # Production stage
-FROM public.ecr.aws/docker/library/node:22-slim
+FROM ${BASE_IMAGE}
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --only=production
 COPY --from=builder /app/dist ./dist
-# Change ownership of the app directory to the node user
-RUN chown -R node:node /app
-# Switch to non-root user
-USER node
-EXPOSE 8080
-CMD [ "node", "dist/server.js" ]
+CMD ["node", "dist/server.js"]

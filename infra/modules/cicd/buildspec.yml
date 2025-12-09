@@ -1,6 +1,19 @@
 version: 0.2
 
 phases:
+  install:
+    commands:
+      - echo "Configuring Buildah for CodeBuild..."
+      - mkdir -p /etc/containers
+      - |
+        cat > /etc/containers/storage.conf <<EOF
+        [storage]
+        driver = "vfs"
+        runroot = "/var/run/containers/storage"
+        graphroot = "/var/lib/containers/storage"
+        EOF
+      - mkdir -p /var/lib/containers/storage
+      - chmod 755 /var/lib/containers/storage
   pre_build:
     commands:
       - echo Logging in to Amazon ECR...

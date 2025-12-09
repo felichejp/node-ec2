@@ -19,7 +19,7 @@ phases:
       - echo Logging in to Amazon ECR...
       - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | buildah login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
-      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/node-backend-app
+      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/image-services
       - BASE_IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/image-base:base-image-node22
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=${COMMIT_HASH:=latest}
@@ -56,7 +56,7 @@ phases:
           exit 1
         fi
       - echo "Creating security group..."
-      - SG_ID=$(aws ec2 create-security-group --group-name node-backend-app-sg-$(date +%s) --description "Security group for node backend app" --vpc-id $VPC_ID --region $AWS_DEFAULT_REGION --query 'GroupId' --output text)
+      - SG_ID=$(aws ec2 create-security-group --group-name image-services-sg-$(date +%s) --description "Security group for services" --vpc-id $VPC_ID --region $AWS_DEFAULT_REGION --query 'GroupId' --output text)
       - echo "Security Group ID - $SG_ID"
       - echo "Adding ingress rules..."
       - aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION
@@ -77,11 +77,11 @@ phases:
         aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
         
         # Pull and run the container
-        docker pull $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/node-backend-app:latest
-        docker run -d -p 80:8080 -p 8080:8080 --name node-app $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/node-backend-app:latest
+        docker pull $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/image-services:latest
+        docker run -d -p 80:8080 -p 8080:8080 --name service-app $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/image-services:latest
         USERDATA
       - echo "Launching EC2 instance..."
-      - INSTANCE_ID=$(aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --subnet-id $SUBNET_ID --security-group-ids $SG_ID --iam-instance-profile Name=node-backend-ec2-profile --associate-public-ip-address --user-data file:///tmp/user-data.sh --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=node-backend-app},{Key=ManagedBy,Value=CodeBuild}]' --region $AWS_DEFAULT_REGION --query 'Instances[0].InstanceId' --output text)
+      - INSTANCE_ID=$(aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --subnet-id $SUBNET_ID --security-group-ids $SG_ID --iam-instance-profile Name=node-backend-ec2-profile --associate-public-ip-address --user-data file:///tmp/user-data.sh --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=image-services},{Key=ManagedBy,Value=CodeBuild}]' --region $AWS_DEFAULT_REGION --query 'Instances[0].InstanceId' --output text)
       - echo "Launched EC2 instance - $INSTANCE_ID"
       - PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
       - echo "Instance Public IP - $PUBLIC_IP"

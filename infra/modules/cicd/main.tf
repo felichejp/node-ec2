@@ -32,7 +32,7 @@ resource "aws_s3_object" "folders" {
 
 # ECR Resources
 resource "aws_ecr_repository" "app_repo" {
-  name                 = "node-backend-app"
+  name                 = "image-services"
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {

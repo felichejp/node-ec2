@@ -1,0 +1,43 @@
+name: make server
+
+on:
+  push:
+    tags:
+      - 'v-backend*'
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install and Build
+        working-directory: code
+        run: |
+          npm ci
+          npm run build
+
+      - name: Zip Source Code
+        run: |
+          zip -r server.zip code infra/buildspec.yml -x "code/node_modules/*" -x "code/dist/*"
+
+      - name: Configure AWS credentials
+        uses: actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload to S3
+        run: |
+          aws s3 cp server.zip s3://cicd-sources/server/server.zip

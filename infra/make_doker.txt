@@ -1,0 +1,9 @@
+I have a basic test node proyect
+It's a simple express server
+I want to copmpile it in github actions
+And upload it to AWS S3 bucket
+trigger codebuld when S3 bucket is updated
+then in codebuild make a docker image with node 22 image base from ECR
+Then push it to ECR
+then in codepipeline make a pipeline to deploy the docker image to EC2
+

@@ -1,0 +1,64 @@
+name: Build and Push Base Image to ECR
+
+on:
+  push:
+    tags:
+      - 'base-image-node22-v*'
+      - 'base-image-net8-v*'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Determine Dockerfile
+      id: determine-dockerfile
+      env:
+        IMAGE_TAG: ${{ github.ref_name }}
+      run: |
+        # Determine Dockerfile based on tag
+        if [[ "$IMAGE_TAG" == "base-image-node22-"* ]]; then
+          echo "dockerfile=Docker-Images/Dockerfile.node22-prod" >> $GITHUB_OUTPUT
+          echo "Selected Node 22 Prod Dockerfile"
+        elif [[ "$IMAGE_TAG" == "base-image-net8-"* ]]; then
+          echo "dockerfile=Docker-Images/Dockerfile.net8.0-prod" >> $GITHUB_OUTPUT
+          echo "Selected .NET 8 Prod Dockerfile"
+        else
+          echo "Error: Unknown tag format"
+          exit 1
+        fi
+
+    - name: Build Image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: node-backend-base
+        IMAGE_TAG: ${{ github.ref_name }}
+        DOCKERFILE: ${{ steps.determine-dockerfile.outputs.dockerfile }}
+      run: |
+        echo "Building with $DOCKERFILE"
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f $DOCKERFILE .
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+    - name: Push Image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: node-backend-base
+        IMAGE_TAG: ${{ github.ref_name }}
+      run: |
+        echo "Pushing images..."
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest

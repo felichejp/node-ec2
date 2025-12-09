@@ -2,15 +2,19 @@
   "name": "ec2",
   "version": "1.0.0",
   "description": "Express.js TypeScript server",
-  "main": "dist/index.js",
+  "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
+    "start": "node dist/server.js",
+    "dev": "ts-node src/server.ts",
     "clean": "rm -rf dist",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["express", "typescript", "node"],
+  "keywords": [
+    "express",
+    "typescript",
+    "node"
+  ],
   "author": "Felichito",
   "license": "ISC",
   "type": "commonjs",

@@ -4,27 +4,23 @@ phases:
   install:
     commands:
       - echo "=== INSTALL PHASE ==="
-      - echo "Installing Buildah..."
-      - |
-        # Install buildah based on OS
-        if [ -f /etc/os-release ]; then
-          . /etc/os-release
-          if [ "$ID" = "amzn" ] || [ "$ID" = "rhel" ] || [ "$ID" = "centos" ]; then
-            # Amazon Linux / RHEL / CentOS
-            yum update -y || dnf update -y || true
-            yum install -y buildah || dnf install -y buildah || true
-          elif [ "$ID" = "ubuntu" ] || [ "$ID" = "debian" ]; then
-            # Ubuntu / Debian
-            apt-get update -y
-            apt-get install -y buildah || true
-          fi
-        else
-          # Fallback: try both package managers
-          yum install -y buildah || dnf install -y buildah || apt-get update -y && apt-get install -y buildah || true
-        fi
+      - echo "Using Buildah from custom image"
       - echo "Verifying Buildah installation..."
-      - buildah --version || echo "Warning: Buildah may not be installed correctly"
-      - echo "Configuring Buildah for CodeBuild..."
+      - buildah --version
+      - echo "Installing QEMU for ARM64 emulation..."
+      - |
+        # Install QEMU for cross-platform builds
+        if command -v apt-get >/dev/null 2>&1; then
+          apt-get update -y
+          apt-get install -y qemu-user-static binfmt-support
+        elif command -v yum >/dev/null 2>&1; then
+          yum install -y qemu-user-static || dnf install -y qemu-user-static || echo "QEMU installation skipped"
+        elif command -v dnf >/dev/null 2>&1; then
+          dnf install -y qemu-user-static || echo "QEMU installation skipped"
+        else
+          echo "Warning: Could not install QEMU, cross-platform builds may fail"
+        fi
+      - echo "Configuring Buildah storage..."
       - mkdir -p /etc/containers
       - |
         cat > /etc/containers/storage.conf <<EOF
@@ -34,8 +30,10 @@ phases:
         graphroot = "/var/lib/containers/storage"
         EOF
       - mkdir -p /var/lib/containers/storage
+      - mkdir -p /var/run/containers/storage
       - chmod 755 /var/lib/containers/storage
-      - echo "Buildah configuration completed"
+      - chmod 755 /var/run/containers/storage
+      - echo "Buildah is ready to use"
   
   pre_build:
     commands:
@@ -64,9 +62,33 @@ phases:
         echo "Base Image URI: ${BASE_IMAGE_URI}"
         echo "Buildah Image URI: ${BUILDah_IMAGE_URI}"
         
-        # Pull base image from ECR
+        # Pull base image from ECR (required for build)
         echo "Pulling base Node.js image from ECR..."
-        buildah pull "${BASE_IMAGE_URI}" || echo "Warning: Could not pull base image, will use FROM in Dockerfile"
+        echo "Attempting to pull: ${BASE_IMAGE_URI}"
+        PULL_OUTPUT=$(buildah pull "${BASE_IMAGE_URI}" 2>&1)
+        PULL_EXIT=$?
+        if [ $PULL_EXIT -ne 0 ]; then
+          echo "WARNING: Failed to pull base image (exit code: $PULL_EXIT)"
+          echo "Pull output: $PULL_OUTPUT"
+          echo "Attempting to pull with ARM64 platform..."
+          PULL_OUTPUT2=$(buildah pull --platform linux/arm64 "${BASE_IMAGE_URI}" 2>&1)
+          PULL_EXIT2=$?
+          if [ $PULL_EXIT2 -ne 0 ]; then
+            echo "ERROR: Failed to pull base image with ARM64 (exit code: $PULL_EXIT2)"
+            echo "Pull output: $PULL_OUTPUT2"
+            echo "Verifying ECR authentication..."
+            buildah login --get-login "${ECR_REGISTRY}" || echo "Login check failed"
+            echo "Listing available images in ECR..."
+            aws ecr describe-images --repository-name image-base --region "${AWS_DEFAULT_REGION}" --query 'imageDetails[*].imageTags' --output table || echo "Failed to list images"
+            echo "WARNING: Continuing build - buildah will attempt to pull during build"
+          else
+            echo "Base image pulled successfully with ARM64 platform"
+          fi
+        else
+          echo "Base image pulled successfully"
+        fi
+        echo "Verifying base image is available..."
+        buildah images | grep "image-base" || echo "Base image not in local cache"
         
         # Get commit hash for tagging
         if [ -n "${CODEBUILD_RESOLVED_SOURCE_VERSION}" ]; then
@@ -106,19 +128,26 @@ phases:
         echo "Building for ARM64 architecture (linux/arm64)..."
         echo "Repository URI: ${REPOSITORY_URI}"
         echo "Image tag: ${IMAGE_TAG}"
-      
-      # Build the image with buildah, specifying ARM64 platform
       - |
-        buildah bud --platform linux/arm64 --build-arg BASE_IMAGE="${BASE_IMAGE_URI}" -t "${REPOSITORY_URI}:server" -f ./code/Dockerfile ./code
-      
+        echo "Building image with buildah..."
+        echo "Base image: ${BASE_IMAGE_URI}"
+        echo "Verifying base image is available locally..."
+        buildah images | grep "image-base" || echo "Base image not found locally"
+        echo "Listing all buildah images:"
+        buildah images
+        echo "Attempting to build with buildah..."
+        buildah bud --platform linux/arm64 --build-arg BASE_IMAGE="${BASE_IMAGE_URI}" -t "${REPOSITORY_URI}:server" -f ./code/Dockerfile ./code || {
+          echo "Build failed. Checking if base image exists..."
+          buildah images | grep -E "(image-base|base-image)" || echo "No base images found"
+          echo "Attempting to pull base image again..."
+          buildah pull --platform linux/arm64 "${BASE_IMAGE_URI}" || buildah pull "${BASE_IMAGE_URI}" || echo "Failed to pull base image"
+          echo "Retrying build..."
+          buildah bud --platform linux/arm64 --build-arg BASE_IMAGE="${BASE_IMAGE_URI}" -t "${REPOSITORY_URI}:server" -f ./code/Dockerfile ./code
+        }
       - echo "Image built successfully"
       - echo "Creating additional tags..."
-      
-      # Tag as latest
       - |
         buildah tag "${REPOSITORY_URI}:server" "${REPOSITORY_URI}:latest"
-      
-      # Tag with commit hash
       - |
         buildah tag "${REPOSITORY_URI}:server" "${REPOSITORY_URI}:${IMAGE_TAG}"
       
@@ -152,22 +181,15 @@ phases:
         echo "Pushing images to ECR..."
         echo "Repository URI: ${REPOSITORY_URI}"
         echo "Image tag: ${IMAGE_TAG}"
-      
       - echo "Listing images before push..."
       - |
         buildah images | grep "${REPOSITORY_URI}" || echo "No images found matching ${REPOSITORY_URI}"
-      
-      # Push commit hash tag first
       - |
         echo "Pushing commit hash tag: ${IMAGE_TAG}"
         buildah push "${REPOSITORY_URI}:${IMAGE_TAG}"
-      
-      # Push server tag
       - |
         echo "Pushing server tag..."
         buildah push "${REPOSITORY_URI}:server"
-      
-      # Push latest tag (this will replace previous latest)
       - |
         echo "Pushing latest tag..."
         buildah push "${REPOSITORY_URI}:latest"

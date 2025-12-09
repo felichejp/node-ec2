@@ -87,6 +87,9 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build and push CodeBuild-Buildah image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -95,18 +98,15 @@ jobs:
           CODEBUILD_TAG="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:codebuild-buildah"
           LATEST_TAG="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
           
-          echo "🔨 Building CodeBuild-Buildah image..."
+          echo "🔨 Building CodeBuild-Buildah image for ARM64..."
           echo "   Version tag: $IMAGE_TAG (for reference only, not pushed to ECR)"
-          docker build -t "$CODEBUILD_TAG" ./docker/codebuild-buildah
+          echo "🏗️ Building for ARM64 architecture (linux/arm64)..."
           
-          # Tag with latest
-          docker tag "$CODEBUILD_TAG" "$LATEST_TAG"
+          # Build and push codebuild-buildah tag
+          docker buildx build --platform linux/arm64 -t "$CODEBUILD_TAG" -f ./docker/codebuild-buildah/Dockerfile . --push
           
-          echo "📤 Pushing codebuild-buildah tag"
-          docker push "$CODEBUILD_TAG"
-          
-          echo "📤 Pushing latest tag"
-          docker push "$LATEST_TAG"
+          # Build and push latest tag
+          docker buildx build --platform linux/arm64 -t "$LATEST_TAG" -f ./docker/codebuild-buildah/Dockerfile . --push
           
           echo "✅ CodeBuild-Buildah image pushed successfully!"
           echo "   - $CODEBUILD_TAG"

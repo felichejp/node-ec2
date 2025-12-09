@@ -10,6 +10,7 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/base-image-')
     
     steps:
     - name: Checkout code

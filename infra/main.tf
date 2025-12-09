@@ -2,16 +2,16 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# module "networking" {
-#   source = "./modules/networking"
+module "networking" {
+  source = "./modules/networking"
 
-#   vpc_name         = var.vpc_name
-#   vpc_cidr         = var.vpc_cidr
-#   azs              = var.azs
-#   private_subnets  = var.private_subnets
-#   public_subnets   = var.public_subnets
-#   database_subnets = var.database_subnets
-# }
+  vpc_name         = var.vpc_name
+  vpc_cidr         = var.vpc_cidr
+  azs              = var.azs
+  private_subnets  = var.private_subnets
+  public_subnets   = var.public_subnets
+  database_subnets = var.database_subnets
+}
 
 # module "database" {
 #   source = "./modules/database"

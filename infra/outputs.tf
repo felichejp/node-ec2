@@ -1,7 +1,12 @@
-# output "vpc_id" {
-#   description = "The ID of the VPC"
-#   value       = module.networking.vpc_id
-# }
+output "vpc_id" {
+  description = "The ID of the VPC"
+  value       = module.networking.vpc_id
+}
+
+output "public_subnets" {
+  description = "List of public subnet IDs"
+  value       = module.networking.public_subnets
+}
 
 # output "db_endpoint" {
 #   description = "The connection endpoint for the database"

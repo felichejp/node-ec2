@@ -21,3 +21,15 @@ phases:
       - echo Pushing the Docker image...
       - docker push $REPOSITORY_URI:latest
       - docker push $REPOSITORY_URI:$IMAGE_TAG
+      - echo Launching EC2 instance...
+      - AMI_ID=$(aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --region $AWS_DEFAULT_REGION --query 'Parameters[0].Value' --output text)
+      - ECR_PASSWORD=$(aws ecr get-login-password --region $AWS_DEFAULT_REGION)
+      - |
+        USER_DATA='#!/bin/bash
+        yum update -y
+        yum install -y docker
+        systemctl start docker
+        systemctl enable docker
+        echo "'$ECR_PASSWORD'" | docker login --username AWS --password-stdin '$REPOSITORY_URI'
+        docker run -d -p 80:8000 '$REPOSITORY_URI':latest'
+      - aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --user-data "$USER_DATA" --region $AWS_DEFAULT_REGION

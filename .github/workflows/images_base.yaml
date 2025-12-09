@@ -86,7 +86,7 @@ jobs:
       - name: Build and push CodeBuild-Buildah image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: node-backend-base
+          ECR_REPOSITORY: image-base
           IMAGE_TAG: ${{ steps.get_version.outputs.tag }}
         run: |
           echo "Building CodeBuild-Buildah image..."

@@ -68,7 +68,7 @@ resource "aws_ecr_lifecycle_policy" "app_repo_policy" {
 }
 
 resource "aws_ecr_repository" "base_repo" {
-  name                 = "node-backend-base"
+  name                 = "image-base"
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {

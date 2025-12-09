@@ -89,21 +89,15 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.ref_name }}
         run: |
-          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
           CODEBUILD_TAG="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:codebuild-buildah"
           LATEST_TAG="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
           
           echo "🔨 Building CodeBuild-Buildah image..."
-          docker build -t "$IMAGE_URI" ./docker/codebuild-buildah
-          
-          # Tag with codebuild-buildah
-          docker tag "$IMAGE_URI" "$CODEBUILD_TAG"
+          echo "   Version tag: $IMAGE_TAG (for reference only, not pushed to ECR)"
+          docker build -t "$CODEBUILD_TAG" ./docker/codebuild-buildah
           
           # Tag with latest
-          docker tag "$IMAGE_URI" "$LATEST_TAG"
-          
-          echo "📤 Pushing versioned tag: $IMAGE_TAG"
-          docker push "$IMAGE_URI"
+          docker tag "$CODEBUILD_TAG" "$LATEST_TAG"
           
           echo "📤 Pushing codebuild-buildah tag"
           docker push "$CODEBUILD_TAG"
@@ -112,7 +106,6 @@ jobs:
           docker push "$LATEST_TAG"
           
           echo "✅ CodeBuild-Buildah image pushed successfully!"
-          echo "   - $IMAGE_URI"
           echo "   - $CODEBUILD_TAG"
           echo "   - $LATEST_TAG"
 

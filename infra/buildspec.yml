@@ -24,8 +24,9 @@ phases:
       - docker push $REPOSITORY_URI:$IMAGE_TAG
       - echo Launching EC2 instance...
       - AMI_ID=$(aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --region $AWS_DEFAULT_REGION --query 'Parameters[0].Value' --output text)
+      - echo "Creating user data script..."
       - |
-        USER_DATA=$(cat <<'EOF'
+        cat > /tmp/user-data.sh << 'USERDATA'
         #!/bin/bash
         yum update -y
         yum install -y docker
@@ -40,16 +41,7 @@ phases:
         # Pull and run the container
         docker pull $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/node-backend-app:latest
         docker run -d -p 80:8080 -p 8080:8080 --name node-app $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/node-backend-app:latest
-        EOF
-        )
-      - echo "$USER_DATA" > /tmp/user-data.sh
-      - |
-        INSTANCE_ID=$(aws ec2 run-instances \
-          --image-id $AMI_ID \
-          --instance-type t3.micro \
-          --user-data file:///tmp/user-data.sh \
-          --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=node-backend-app},{Key=ManagedBy,Value=CodeBuild}]' \
-          --region $AWS_DEFAULT_REGION \
-          --query 'Instances[0].InstanceId' \
-          --output text)
-      - echo "Launched EC2 instance: $INSTANCE_ID"
+        USERDATA
+      - echo "Launching EC2 instance..."
+      - INSTANCE_ID=$(aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --user-data file:///tmp/user-data.sh --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=node-backend-app},{Key=ManagedBy,Value=CodeBuild}]' --region $AWS_DEFAULT_REGION --query 'Instances[0].InstanceId' --output text)
+      - echo "Launched EC2 instance - $INSTANCE_ID"

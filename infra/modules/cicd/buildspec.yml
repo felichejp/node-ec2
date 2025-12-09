@@ -27,8 +27,8 @@ phases:
       - echo "Using VPC created by Terraform..."
       - VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=eks-vpc" --region $AWS_DEFAULT_REGION --query 'Vpcs[0].VpcId' --output text)
       - echo "VPC ID - $VPC_ID"
-      - echo "Getting public subnet..."
-      - SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=map-public-ip-on-launch,Values=true" --region $AWS_DEFAULT_REGION --query 'Subnets[0].SubnetId' --output text)
+      - echo "Getting first available subnet..."
+      - SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --region $AWS_DEFAULT_REGION --query 'Subnets[0].SubnetId' --output text)
       - echo "Subnet ID - $SUBNET_ID"
       - echo "Creating security group..."
       - SG_ID=$(aws ec2 create-security-group --group-name node-backend-app-sg-$(date +%s) --description "Security group for node backend app" --vpc-id $VPC_ID --region $AWS_DEFAULT_REGION --query 'GroupId' --output text)

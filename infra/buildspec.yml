@@ -24,13 +24,32 @@ phases:
       - docker push $REPOSITORY_URI:$IMAGE_TAG
       - echo Launching EC2 instance...
       - AMI_ID=$(aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --region $AWS_DEFAULT_REGION --query 'Parameters[0].Value' --output text)
-      - ECR_PASSWORD=$(aws ecr get-login-password --region $AWS_DEFAULT_REGION)
       - |
-        USER_DATA='#!/bin/bash
+        USER_DATA=$(cat <<'EOF'
+        #!/bin/bash
         yum update -y
         yum install -y docker
         systemctl start docker
         systemctl enable docker
-        echo "'$ECR_PASSWORD'" | docker login --username AWS --password-stdin '$REPOSITORY_URI'
-        docker run -d -p 80:8000 '$REPOSITORY_URI':latest'
-      - aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --user-data "$USER_DATA" --region $AWS_DEFAULT_REGION
+        usermod -a -G docker ec2-user
+        
+        # Get ECR login and pull image
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
+        
+        # Pull and run the container
+        docker pull $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/node-backend-app:latest
+        docker run -d -p 80:8000 --name node-app $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/node-backend-app:latest
+        EOF
+        )
+      - echo "$USER_DATA" > /tmp/user-data.sh
+      - |
+        INSTANCE_ID=$(aws ec2 run-instances \
+          --image-id $AMI_ID \
+          --instance-type t3.micro \
+          --user-data file:///tmp/user-data.sh \
+          --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=node-backend-app},{Key=ManagedBy,Value=CodeBuild}]' \
+          --region $AWS_DEFAULT_REGION \
+          --query 'Instances[0].InstanceId' \
+          --output text)
+      - echo "Launched EC2 instance: $INSTANCE_ID"

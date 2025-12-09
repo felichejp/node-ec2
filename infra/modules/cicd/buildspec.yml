@@ -24,6 +24,19 @@ phases:
       - docker push $REPOSITORY_URI:$IMAGE_TAG
       - echo Launching EC2 instance...
       - AMI_ID=$(aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --region $AWS_DEFAULT_REGION --query 'Parameters[0].Value' --output text)
+      - echo "Getting default VPC..."
+      - VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --region $AWS_DEFAULT_REGION --query 'Vpcs[0].VpcId' --output text)
+      - echo "VPC ID - $VPC_ID"
+      - echo "Getting public subnet..."
+      - SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=map-public-ip-on-launch,Values=true" --region $AWS_DEFAULT_REGION --query 'Subnets[0].SubnetId' --output text)
+      - echo "Subnet ID - $SUBNET_ID"
+      - echo "Creating security group..."
+      - SG_ID=$(aws ec2 create-security-group --group-name node-backend-app-sg-$(date +%s) --description "Security group for node backend app" --vpc-id $VPC_ID --region $AWS_DEFAULT_REGION --query 'GroupId' --output text)
+      - echo "Security Group ID - $SG_ID"
+      - echo "Adding ingress rules..."
+      - aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION
+      - aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 8080 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION
+      - aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 22 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION
       - echo "Creating user data script..."
       - |
         cat > /tmp/user-data.sh << 'USERDATA'
@@ -43,5 +56,8 @@ phases:
         docker run -d -p 80:8080 -p 8080:8080 --name node-app $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/node-backend-app:latest
         USERDATA
       - echo "Launching EC2 instance..."
-      - INSTANCE_ID=$(aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --user-data file:///tmp/user-data.sh --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=node-backend-app},{Key=ManagedBy,Value=CodeBuild}]' --region $AWS_DEFAULT_REGION --query 'Instances[0].InstanceId' --output text)
+      - INSTANCE_ID=$(aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --subnet-id $SUBNET_ID --security-group-ids $SG_ID --associate-public-ip-address --user-data file:///tmp/user-data.sh --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=node-backend-app},{Key=ManagedBy,Value=CodeBuild}]' --region $AWS_DEFAULT_REGION --query 'Instances[0].InstanceId' --output text)
       - echo "Launched EC2 instance - $INSTANCE_ID"
+      - PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+      - echo "Instance Public IP - $PUBLIC_IP"
+      - echo "Application will be available at http://$PUBLIC_IP:80 and http://$PUBLIC_IP:8080"

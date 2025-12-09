@@ -27,9 +27,21 @@ phases:
       - echo "Using VPC created by Terraform..."
       - VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=eks-vpc" --region $AWS_DEFAULT_REGION --query 'Vpcs[0].VpcId' --output text)
       - echo "VPC ID - $VPC_ID"
+      - |
+        if [ "$VPC_ID" == "None" ] || [ -z "$VPC_ID" ]; then
+          echo "ERROR: VPC not found!"
+          exit 1
+        fi
       - echo "Getting first available subnet..."
+      - echo "Listing all subnets in VPC..."
+      - aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --region $AWS_DEFAULT_REGION --query 'Subnets[*].[SubnetId,AvailabilityZone]' --output table
       - SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --region $AWS_DEFAULT_REGION --query 'Subnets[0].SubnetId' --output text)
       - echo "Subnet ID - $SUBNET_ID"
+      - |
+        if [ "$SUBNET_ID" == "None" ] || [ -z "$SUBNET_ID" ]; then
+          echo "ERROR: No subnets found in VPC!"
+          exit 1
+        fi
       - echo "Creating security group..."
       - SG_ID=$(aws ec2 create-security-group --group-name node-backend-app-sg-$(date +%s) --description "Security group for node backend app" --vpc-id $VPC_ID --region $AWS_DEFAULT_REGION --query 'GroupId' --output text)
       - echo "Security Group ID - $SG_ID"

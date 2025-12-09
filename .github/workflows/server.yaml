@@ -8,9 +8,6 @@ on:
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
 
     steps:
       - name: Checkout code
@@ -32,7 +29,7 @@ jobs:
           zip -r server.zip code infra/buildspec.yml -x "code/node_modules/*" -x "code/dist/*"
 
       - name: Configure AWS credentials
-        uses: actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

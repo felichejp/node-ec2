@@ -4,9 +4,7 @@ on:
   push:
     tags:
       - 'base-image-node22-v*'
-      - 'base-image-node22'
       - 'base-image-net8-v*'
-      - 'base-image-net8'
 
 jobs:
   build-and-push:
@@ -27,7 +25,7 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Determine Dockerfile
+    - name: Determine Dockerfile and Image Tag
       id: determine-dockerfile
       env:
         IMAGE_TAG: ${{ github.ref_name }}
@@ -35,22 +33,24 @@ jobs:
         # Determine Dockerfile based on tag
         if [[ "$IMAGE_TAG" == "base-image-node22-"* ]]; then
           echo "dockerfile=Docker-Images/Dockerfile.node22-prod" >> $GITHUB_OUTPUT
+          echo "ecr_tag=base-image-node22" >> $GITHUB_OUTPUT
           echo "Selected Node 22 Prod Dockerfile"
         elif [[ "$IMAGE_TAG" == "base-image-net8-"* ]]; then
           echo "dockerfile=Docker-Images/Dockerfile.net8.0-prod" >> $GITHUB_OUTPUT
+          echo "ecr_tag=base-image-net8" >> $GITHUB_OUTPUT
           echo "Selected .NET 8 Prod Dockerfile"
         else
           echo "Error: Unknown tag format"
           exit 1
         fi
 
-    - name: Build Image
+    - name: Build and Push Image
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         ECR_REPOSITORY: node-backend-base
-        IMAGE_TAG: ${{ github.ref_name }}
+        ECR_TAG: ${{ steps.determine-dockerfile.outputs.ecr_tag }}
         DOCKERFILE: ${{ steps.determine-dockerfile.outputs.dockerfile }}
       run: |
         echo "Building with $DOCKERFILE"
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f $DOCKERFILE .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$ECR_TAG -f $DOCKERFILE .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$ECR_TAG

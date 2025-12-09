@@ -151,6 +151,11 @@ resource "aws_iam_role_policy" "ec2_ecr_policy" {
   })
 }
 
+resource "aws_iam_role_policy_attachment" "ec2_ssm_policy" {
+  role       = aws_iam_role.ec2_instance_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_instance_profile" "ec2_instance_profile" {
   name = "node-backend-ec2-profile"
   role = aws_iam_role.ec2_instance_role.name
@@ -227,7 +232,8 @@ resource "aws_iam_role_policy" "codebuild_policy" {
           "ec2:DescribeVpcs",
           "ec2:CreateSecurityGroup",
           "ec2:AuthorizeSecurityGroupIngress",
-          "ec2:CreateTags"
+          "ec2:CreateTags",
+          "ec2:StartInstances"
         ]
         Resource = "*"
       },
@@ -235,9 +241,13 @@ resource "aws_iam_role_policy" "codebuild_policy" {
         Effect = "Allow"
         Action = [
           "ssm:GetParameters",
-          "ssm:GetParameter"
+          "ssm:GetParameter",
+          "ssm:SendCommand",
+          "ssm:DescribeInstanceInformation",
+          "ssm:GetCommandInvocation",
+          "ssm:ListCommandInvocations"
         ]
-        Resource = "arn:aws:ssm:*:*:parameter/aws/service/ami-amazon-linux-latest/*"
+        Resource = "*"
       },
       {
         Effect = "Allow"

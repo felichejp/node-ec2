@@ -33,56 +33,186 @@ phases:
     commands:
       - echo Build completed on `date`
       - echo Pushing the image with Buildah...
+      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/image-services
       - buildah push $REPOSITORY_URI:latest
       - buildah push $REPOSITORY_URI:$IMAGE_TAG
-      - echo Launching EC2 instance...
-      - AMI_ID=$(aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --region $AWS_DEFAULT_REGION --query 'Parameters[0].Value' --output text)
-      - echo "Using VPC created by Terraform..."
-      - VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=eks-vpc" --region $AWS_DEFAULT_REGION --query 'Vpcs[0].VpcId' --output text)
-      - echo "VPC ID - $VPC_ID"
+      - echo "Checking for existing EC2 instance named 'server'..."
       - |
-        if [ "$VPC_ID" == "None" ] || [ -z "$VPC_ID" ]; then
-          echo "ERROR: VPC not found!"
-          exit 1
-        fi
-      - echo "Getting first available subnet..."
-      - echo "Listing all subnets in VPC..."
-      - aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --region $AWS_DEFAULT_REGION --query 'Subnets[*].[SubnetId,AvailabilityZone]' --output table
-      - SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --region $AWS_DEFAULT_REGION --query 'Subnets[0].SubnetId' --output text)
-      - echo "Subnet ID - $SUBNET_ID"
-      - |
-        if [ "$SUBNET_ID" == "None" ] || [ -z "$SUBNET_ID" ]; then
-          echo "ERROR: No subnets found in VPC!"
-          exit 1
-        fi
-      - echo "Creating security group..."
-      - SG_ID=$(aws ec2 create-security-group --group-name image-services-sg-$(date +%s) --description "Security group for services" --vpc-id $VPC_ID --region $AWS_DEFAULT_REGION --query 'GroupId' --output text)
-      - echo "Security Group ID - $SG_ID"
-      - echo "Adding ingress rules..."
-      - aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION
-      - aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 8080 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION
-      - aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 22 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION
-      - echo "Creating user data script..."
-      - |
-        cat > /tmp/user-data.sh << 'USERDATA'
-        #!/bin/bash
-        yum update -y
-        yum install -y docker
-        systemctl start docker
-        systemctl enable docker
-        usermod -a -G docker ec2-user
-        
-        # Get ECR login and pull image
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-        aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
+        REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/image-services
         
-        # Pull and run the container
-        docker pull $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/image-services:latest
-        docker run -d -p 80:8080 -p 8080:8080 --name service-app $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/image-services:latest
-        USERDATA
-      - echo "Launching EC2 instance..."
-      - INSTANCE_ID=$(aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --subnet-id $SUBNET_ID --security-group-ids $SG_ID --iam-instance-profile Name=node-backend-ec2-profile --associate-public-ip-address --user-data file:///tmp/user-data.sh --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=image-services},{Key=ManagedBy,Value=CodeBuild}]' --region $AWS_DEFAULT_REGION --query 'Instances[0].InstanceId' --output text)
-      - echo "Launched EC2 instance - $INSTANCE_ID"
-      - PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-      - echo "Instance Public IP - $PUBLIC_IP"
-      - echo "Application will be available at http://$PUBLIC_IP:80 and http://$PUBLIC_IP:8080"
+        echo "Looking for existing instance with name 'server'..."
+        INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=server" "Name=instance-state-name,Values=running,stopped,stopping" --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || echo "")
+        
+        if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ] && [ "$INSTANCE_ID" != "null" ] && [ "$INSTANCE_ID" != "none" ]; then
+          echo "Found existing instance: $INSTANCE_ID"
+          echo "Updating container on existing instance..."
+          
+          # Wait for instance to be running if it's stopped
+          INSTANCE_STATE=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].State.Name' --output text)
+          if [ "$INSTANCE_STATE" = "stopped" ]; then
+            echo "Starting stopped instance..."
+            aws ec2 start-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION
+            echo "Waiting for instance to be running..."
+            aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION
+            echo "Waiting for SSM agent to be ready..."
+            sleep 30
+          fi
+          
+          # Wait for SSM to be ready
+          echo "Waiting for SSM to be ready..."
+          for i in {1..30}; do
+            if aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$INSTANCE_ID" --region $AWS_DEFAULT_REGION --query 'InstanceInformationList[0].PingStatus' --output text | grep -q "Online"; then
+              echo "SSM is ready"
+              break
+            fi
+            echo "Waiting for SSM... ($i/30)"
+            sleep 5
+          done
+          
+          # Update container using SSM
+          echo "Stopping existing container..."
+          COMMAND_ID_STOP=$(aws ssm send-command \
+            --instance-ids $INSTANCE_ID \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["docker stop service-app || true", "docker rm service-app || true"]' \
+            --region $AWS_DEFAULT_REGION \
+            --query 'Command.CommandId' --output text)
+          
+          # Wait for command to complete
+          echo "Waiting for stop command to complete..."
+          aws ssm wait command-executed --command-id $COMMAND_ID_STOP --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION || true
+          
+          echo "Pulling latest image and starting container..."
+          COMMAND_ID_START=$(aws ssm send-command \
+            --instance-ids $INSTANCE_ID \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"AWS_ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text)\", \"aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin \$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com\", \"docker pull $REPOSITORY_URI:latest\", \"docker run -d -p 80:8080 -p 8080:8080 --name service-app --restart unless-stopped $REPOSITORY_URI:latest\"]" \
+            --region $AWS_DEFAULT_REGION \
+            --query 'Command.CommandId' --output text)
+          
+          # Wait for command to complete
+          echo "Waiting for start command to complete..."
+          aws ssm wait command-executed --command-id $COMMAND_ID_START --instance-id $INSTANCE_ID --region $AWS_DEFAULT_REGION || true
+          
+          PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          echo "Updated existing instance: $INSTANCE_ID"
+          echo "Instance Public IP - $PUBLIC_IP"
+          echo "Application will be available at http://$PUBLIC_IP:80 and http://$PUBLIC_IP:8080"
+        else
+          echo "No existing instance found. Creating new instance named 'server'..."
+          AMI_ID=$(aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --region $AWS_DEFAULT_REGION --query 'Parameters[0].Value' --output text 2>/dev/null || echo "")
+          
+          if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "None" ] || [ "$AMI_ID" = "null" ]; then
+            echo "ERROR: Failed to get AMI ID!"
+            exit 1
+          fi
+          
+          echo "Using VPC created by Terraform..."
+          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=eks-vpc" --region $AWS_DEFAULT_REGION --query 'Vpcs[0].VpcId' --output text 2>/dev/null || echo "")
+          echo "VPC ID - $VPC_ID"
+          
+          if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ] || [ "$VPC_ID" = "null" ]; then
+            echo "ERROR: VPC not found!"
+            exit 1
+          fi
+          
+          echo "Getting first available subnet..."
+          SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --region $AWS_DEFAULT_REGION --query 'Subnets[0].SubnetId' --output text 2>/dev/null || echo "")
+          echo "Subnet ID - $SUBNET_ID"
+          
+          if [ -z "$SUBNET_ID" ] || [ "$SUBNET_ID" = "None" ] || [ "$SUBNET_ID" = "null" ]; then
+            echo "ERROR: No subnets found in VPC!"
+            exit 1
+          fi
+          
+          echo "Checking for existing security group..."
+          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=server-sg" "Name=vpc-id,Values=$VPC_ID" --region $AWS_DEFAULT_REGION --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "")
+          
+          # Check if SG_ID is empty or "None" (AWS CLI returns "None" as string when not found)
+          # Also verify it's a valid security group ID (starts with "sg-")
+          SG_VALID=$(echo "$SG_ID" | grep -c "^sg-" || echo "0")
+          if [ -z "$SG_ID" ] || [ "$SG_ID" = "None" ] || [ "$SG_ID" = "null" ] || [ "$SG_ID" = "none" ] || [ "$SG_VALID" = "0" ]; then
+            echo "Security group not found or invalid. Creating new one..."
+            SG_ID=$(aws ec2 create-security-group --group-name server-sg --description "Security group for server instance" --vpc-id $VPC_ID --region $AWS_DEFAULT_REGION --query 'GroupId' --output text 2>/dev/null || echo "")
+            
+            SG_VALID=$(echo "$SG_ID" | grep -c "^sg-" || echo "0")
+            if [ -z "$SG_ID" ] || [ "$SG_ID" = "None" ] || [ "$SG_ID" = "null" ] || [ "$SG_ID" = "none" ] || [ "$SG_VALID" = "0" ]; then
+              echo "ERROR: Failed to create security group! Got: '$SG_ID'"
+              exit 1
+            fi
+            
+            echo "Security Group ID - $SG_ID"
+            echo "Adding ingress rules..."
+            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION 2>/dev/null || true
+            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 8080 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION 2>/dev/null || true
+            aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port 22 --cidr 0.0.0.0/0 --region $AWS_DEFAULT_REGION 2>/dev/null || true
+          else
+            echo "Using existing security group: $SG_ID"
+          fi
+          
+          echo "Creating user data script..."
+          echo '#!/bin/bash' > /tmp/user-data.sh
+          echo 'yum update -y' >> /tmp/user-data.sh
+          echo 'yum install -y docker' >> /tmp/user-data.sh
+          echo 'systemctl start docker' >> /tmp/user-data.sh
+          echo 'systemctl enable docker' >> /tmp/user-data.sh
+          echo 'usermod -a -G docker ec2-user' >> /tmp/user-data.sh
+          echo '' >> /tmp/user-data.sh
+          echo '# Get ECR login and pull image' >> /tmp/user-data.sh
+          echo 'AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)' >> /tmp/user-data.sh
+          echo 'aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com' >> /tmp/user-data.sh
+          echo '' >> /tmp/user-data.sh
+          echo '# Pull and run the container' >> /tmp/user-data.sh
+          echo 'docker pull $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/image-services:latest' >> /tmp/user-data.sh
+          echo 'docker run -d -p 80:8080 -p 8080:8080 --name service-app --restart unless-stopped $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/image-services:latest' >> /tmp/user-data.sh
+          
+          if [ ! -f /tmp/user-data.sh ]; then
+            echo "ERROR: Failed to create user-data.sh file!"
+            exit 1
+          fi
+          
+          echo "User data script created successfully"
+          echo "Launching EC2 instance..."
+          echo "Debug info - AMI_ID: $AMI_ID"
+          echo "Debug info - SUBNET_ID: $SUBNET_ID"
+          echo "Debug info - SG_ID: $SG_ID"
+          echo "Debug info - Region: $AWS_DEFAULT_REGION"
+          
+          # Launch instance and capture both stdout and stderr
+          INSTANCE_OUTPUT=$(aws ec2 run-instances \
+            --image-id "$AMI_ID" \
+            --instance-type t3.micro \
+            --subnet-id "$SUBNET_ID" \
+            --security-group-ids "$SG_ID" \
+            --iam-instance-profile Name=node-backend-ec2-profile \
+            --associate-public-ip-address \
+            --user-data file:///tmp/user-data.sh \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=server},{Key=ManagedBy,Value=CodeBuild}]" \
+            --region "$AWS_DEFAULT_REGION" \
+            --query 'Instances[0].InstanceId' \
+            --output text 2>&1)
+          EXIT_CODE=$?
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "ERROR: Failed to launch EC2 instance (exit code: $EXIT_CODE)!"
+            echo "Error output: $INSTANCE_OUTPUT"
+            exit 1
+          fi
+          
+          INSTANCE_ID="$INSTANCE_OUTPUT"
+          
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ] || [ "$INSTANCE_ID" = "null" ] || [ "$INSTANCE_ID" = "none" ]; then
+            echo "ERROR: Instance ID is empty or invalid!"
+            echo "Received: '$INSTANCE_ID'"
+            echo "Full output: $INSTANCE_OUTPUT"
+            exit 1
+          fi
+          
+          echo "Launched EC2 instance - $INSTANCE_ID"
+          sleep 5
+          PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $AWS_DEFAULT_REGION --query 'Reservations[0].Instances[0].PublicIpAddress' --output text 2>/dev/null || echo "")
+          echo "Instance Public IP - $PUBLIC_IP"
+          echo "Application will be available at http://$PUBLIC_IP:80 and http://$PUBLIC_IP:8080"
+        fi

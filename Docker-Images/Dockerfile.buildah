@@ -1,24 +1,21 @@
-FROM alpine:latest
+FROM public.ecr.aws/docker/library/debian:bullseye-slim
 
-# Instalar dependencias básicas, Buildah y AWS CLI
-# Alpine tiene aws-cli en sus repositorios community
-RUN apk update && \
-    apk add --no-cache \
-    bash \
-    buildah \
-    fuse-overlayfs \
-    git \
-    aws-cli \
-    curl \
-    ca-certificates
+# Instalar Buildah y dependencias
+RUN apt-get update && \
+    apt-get install -y buildah fuse-overlayfs git unzip curl ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Configurar almacenamiento para Buildah (vfs para compatibilidad en contenedores)
+# Instalar AWS CLI v2 (ARM64)
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip" && \
+    unzip awscliv2.zip && \
+    ./aws/install && \
+    rm -rf aws awscliv2.zip
+
+# Configurar almacenamiento
 RUN mkdir -p /etc/containers && \
-    echo '[storage]' > /etc/containers/storage.conf && \
-    echo 'driver = "vfs"' >> /etc/containers/storage.conf
+    echo '[storage]\ndriver = "vfs"' > /etc/containers/storage.conf
 
-# Variables de entorno para Buildah
 ENV BUILDAH_ISOLATION=chroot
 
-# CodeBuild espera un shell interactivo, bash es lo estándar
 CMD ["bash"]

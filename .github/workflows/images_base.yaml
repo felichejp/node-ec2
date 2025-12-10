@@ -3,9 +3,9 @@ name: Build and Push Base Images
 on:
   push:
     tags:
-      - 'node22-v[0-9]+.[0-9]+.[0-9]+'
-      - 'net8-v[0-9]+.[0-9]+.[0-9]+'
-      - 'buildah-v[0-9]+.[0-9]+.[0-9]+'
+      - 'base-image-node22-v[0-9]+.[0-9]+.[0-9]+'
+      - 'base-image-net8-v[0-9]+.[0-9]+.[0-9]+'
+      - 'codebuild-buildah-v[0-9]+.[0-9]+.[0-9]+'
 
 env:
   ECR_REPOSITORY: image-base

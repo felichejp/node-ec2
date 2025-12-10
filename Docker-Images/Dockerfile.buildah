@@ -1,18 +1,34 @@
-FROM public.ecr.aws/docker/library/fedora:latest
+# Usa la última versión de Alpine como imagen base.
+# Alpine es muy pequeña y ligera.
+FROM alpine:latest
 
-RUN dnf update -y && \
-    dnf install -y buildah fuse-overlayfs git unzip qemu-user-static && \
-    dnf clean all
+# Instala las dependencias necesarias.
+# Alpine usa 'apk' como gestor de paquetes.
+# Los paquetes necesarios son 'buildah' y 'shadow' (necesario para la gestión de usuarios/subuids)
+RUN apk update && \
+    apk add buildah shadow && \
+    rm -rf /var/cache/apk/*
 
-RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip" && \
-    unzip awscliv2.zip && \
-    ./aws/install && \
-    rm -rf aws awscliv2.zip
+# Configura un usuario no-root para ejecutar buildah de forma segura (rootless)
+# Esto es crucial para un entorno de construcción seguro.
+RUN addgroup -S buildgrp && adduser -S buildusr -G buildgrp -u 1000
 
-RUN mkdir -p /etc/containers
-RUN echo '[storage]' > /etc/containers/storage.conf && \
-    echo 'driver = "vfs"' >> /etc/containers/storage.conf
+# Prepara el entorno para rootless containers
+# Buildah necesita estos archivos configurados para saber qué UID/GID usar
+RUN echo "buildusr:100000:65536" > /etc/subuid && \
+    echo "buildusr:100000:65536" > /etc/subgid
 
-ENV BUILDAH_ISOLATION=chroot
+# Cambia al usuario no-root
+USER buildusr
 
-CMD ["bash"]
+# Define el directorio de trabajo y configura las variables de entorno XDG para rootless
+ENV HOME /home/buildusr
+ENV XDG_RUNTIME_DIR ${HOME}/.xdg/runtime
+ENV STORAGE_HOME ${HOME}/.local/share/containers
+
+RUN mkdir -p ${XDG_RUNTIME_DIR} ${STORAGE_HOME}
+
+WORKDIR ${HOME}
+
+# Comando por defecto al iniciar el contenedor
+CMD ["buildah", "info"]

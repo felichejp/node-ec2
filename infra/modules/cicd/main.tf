@@ -35,12 +35,20 @@ resource "aws_iam_role_policy" "codebuild_policy" {
       {
         Effect = "Allow"
         Action = [
+          "s3:ListBucket"
+        ]
+        Resource = [
+          var.bucket_arn
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
           "s3:GetObject",
           "s3:GetObjectVersion",
           "s3:PutObject"
         ]
         Resource = [
-          var.bucket_arn,
           "${var.bucket_arn}/*"
         ]
       },
@@ -91,7 +99,7 @@ resource "aws_iam_role_policy" "codebuild_policy" {
   })
 }
 
-# CodeBuild Project
+# CodeBuild Project - Build
 resource "aws_codebuild_project" "this" {
   name          = "node-app-build"
   description   = "Build Node.js App and Push to ECR"
@@ -113,6 +121,30 @@ resource "aws_codebuild_project" "this" {
   source {
     type      = "CODEPIPELINE"
     buildspec = file("${path.module}/buildspec.yml")
+  }
+}
+
+# CodeBuild Project - Deploy
+resource "aws_codebuild_project" "deploy" {
+  name          = "node-app-deploy"
+  description   = "Deploy Node.js App to EC2 via SSM RunCommand"
+  build_timeout = "10"
+  service_role  = aws_iam_role.codebuild_role.arn
+
+  artifacts {
+    type = "CODEPIPELINE"
+  }
+
+  environment {
+    compute_type                = "BUILD_GENERAL1_SMALL"
+    image                       = "${var.base_repo_url}:codebuild-buildah"
+    type                        = "ARM_CONTAINER"
+    image_pull_credentials_type = "SERVICE_ROLE"
+  }
+
+  source {
+    type      = "CODEPIPELINE"
+    buildspec = file("${path.module}/buildspec-deploy.yml")
   }
 }
 
@@ -247,6 +279,23 @@ resource "aws_codepipeline" "pipeline" {
 
       configuration = {
         ProjectName = aws_codebuild_project.this.name
+      }
+    }
+  }
+
+  stage {
+    name = "Deploy"
+
+    action {
+      name            = "Deploy"
+      category        = "Build"
+      owner           = "AWS"
+      provider        = "CodeBuild"
+      input_artifacts = ["source_output"]
+      version         = "1"
+
+      configuration = {
+        ProjectName = aws_codebuild_project.deploy.name
       }
     }
   }

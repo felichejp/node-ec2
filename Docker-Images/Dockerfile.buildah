@@ -1,21 +1,26 @@
-FROM public.ecr.aws/docker/library/debian:bullseye-slim
+FROM node:22-bullseye
+ARG TEMPDIR=install
+RUN apt-get update \
+&& apt-get upgrade -y \
+&& apt install -y buildah curl jq unzip runc uidmap slirp4netns fuse-overlayfs ca-certificates \
+&& mkdir $TEMPDIR \
+&& curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl" \
+&& curl -Lo aws-iam-authenticator https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v0.6.29/aws-iam-authenticator_0.6.29_linux_arm64 \
+&& chmod +x kubectl aws-iam-authenticator \
+&& mv kubectl /usr/bin/ \
+&& mv aws-iam-authenticator /usr/bin \
+&& curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o $TEMPDIR/awscliv2.zip \
+&& cd $TEMPDIR && unzip -qq awscliv2.zip && ./aws/install \
+&& useradd -d /home/betapp -m -c "app owner" betapp \
+&& rm -rf $TEMPDIR \
+&& apt-get clean \
+&& rm -rf /var/lib/apt/lists/* \
+&& echo 'root:changeme' | chpasswd
 
-# Instalar Buildah y dependencias
-RUN apt-get update && \
-    apt-get install -y buildah fuse-overlayfs git unzip curl ca-certificates && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Instalar AWS CLI v2 (ARM64)
-RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip" && \
-    unzip awscliv2.zip && \
-    ./aws/install && \
-    rm -rf aws awscliv2.zip
-
-# Configurar almacenamiento
+# Configurar almacenamiento de Buildah
 RUN mkdir -p /etc/containers && \
     echo '[storage]\ndriver = "vfs"' > /etc/containers/storage.conf
 
-ENV BUILDAH_ISOLATION=chroot
+ENV BUILDAH_ISOLATION=oci
 
 CMD ["bash"]

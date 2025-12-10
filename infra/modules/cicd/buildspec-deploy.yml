@@ -1,0 +1,133 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "=== DEPLOYMENT PHASE ==="
+      - echo "Preparing to deploy to EC2 instance..."
+
+  build:
+    commands:
+      - |
+        set -e
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        export AWS_ACCOUNT_ID
+        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        REPOSITORY_URI="${ECR_REGISTRY}/image-services"
+        
+        echo "Deploying to EC2 instance 'server'..."
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=server" "Name=instance-state-name,Values=running" \
+          --region "${AWS_DEFAULT_REGION}" \
+          --query 'Reservations[0].Instances[0].InstanceId' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -z "${INSTANCE_ID}" ] || [ "${INSTANCE_ID}" = "None" ]; then
+          echo "WARNING: No running 'server' instance found. Skipping deployment."
+          exit 0
+        fi
+        
+        echo "Found running instance: ${INSTANCE_ID}"
+        
+        # Verify SSM Agent is online before sending commands
+        echo "Checking SSM Agent status..."
+        MAX_RETRIES=10
+        RETRY_COUNT=0
+        SSM_ONLINE=false
+        
+        while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+          SSM_STATUS=$(aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
+            --region "${AWS_DEFAULT_REGION}" \
+            --query 'InstanceInformationList[0].PingStatus' \
+            --output text 2>/dev/null || echo "Unknown")
+          
+          if [ "${SSM_STATUS}" = "Online" ]; then
+            echo "✅ SSM Agent is online"
+            SSM_ONLINE=true
+            break
+          else
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "SSM Agent status: ${SSM_STATUS} (retry ${RETRY_COUNT}/${MAX_RETRIES})"
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              sleep 5
+            fi
+          fi
+        done
+        
+        if [ "${SSM_ONLINE}" != "true" ]; then
+          echo "ERROR: SSM Agent is not online after ${MAX_RETRIES} retries. Status: ${SSM_STATUS}"
+          echo "Instance may need SSM Agent installed or IAM role configured."
+          exit 1
+        fi
+        
+        # Deploy using the update script on the instance
+        echo "Triggering update script via SSM..."
+        COMMAND_ID=$(aws ssm send-command \
+          --instance-ids "${INSTANCE_ID}" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "commands=[\"/opt/update-container.sh ${REPOSITORY_URI} server\"]" \
+          --region "${AWS_DEFAULT_REGION}" \
+          --query 'Command.CommandId' --output text 2>&1)
+        
+        if [ $? -ne 0 ]; then
+          echo "ERROR: Failed to send SSM command: ${COMMAND_ID}"
+          exit 1
+        fi
+        
+        echo "SSM Command ID: ${COMMAND_ID}"
+        
+        # Wait for execution with better polling
+        echo "Waiting for deployment to complete..."
+        MAX_WAIT=120
+        WAIT_COUNT=0
+        STATUS="InProgress"
+        
+        while [ "${STATUS}" = "InProgress" ] && [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+          sleep 5
+          WAIT_COUNT=$((WAIT_COUNT + 5))
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${INSTANCE_ID}" \
+            --region "${AWS_DEFAULT_REGION}" \
+            --query 'Status' --output text 2>/dev/null || echo "InProgress")
+          
+          if [ "${STATUS}" != "InProgress" ] && [ "${STATUS}" != "Pending" ]; then
+            break
+          fi
+          
+          echo "Status: ${STATUS} (waited ${WAIT_COUNT}s)"
+        done
+        
+        echo "Final Deployment Status: ${STATUS}"
+        
+        # Get command output
+        OUTPUT=$(aws ssm get-command-invocation \
+          --command-id "${COMMAND_ID}" \
+          --instance-id "${INSTANCE_ID}" \
+          --region "${AWS_DEFAULT_REGION}" \
+          --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+        
+        ERROR=$(aws ssm get-command-invocation \
+          --command-id "${COMMAND_ID}" \
+          --instance-id "${INSTANCE_ID}" \
+          --region "${AWS_DEFAULT_REGION}" \
+          --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
+        
+        if [ -n "${OUTPUT}" ]; then
+          echo "=== Command Output ==="
+          echo "${OUTPUT}"
+        fi
+        
+        if [ -n "${ERROR}" ]; then
+          echo "=== Command Error ==="
+          echo "${ERROR}"
+        fi
+        
+        if [ "${STATUS}" != "Success" ]; then
+          echo "ERROR: Deployment failed with status: ${STATUS}"
+          exit 1
+        else
+          echo "✅ Deployment completed successfully"
+        fi
+

@@ -4,16 +4,10 @@ phases:
   install:
     commands:
       - echo "=== INSTALL PHASE ==="
-      - echo "Environment: Amazon Linux 2023 (Custom Image)"
+      - echo "Environment Amazon Linux 2023 (Custom Image)"
       - echo "Verifying tools..."
       - buildah --version
       - aws --version
-      - |
-        if [ -f /usr/bin/qemu-aarch64-static ]; then
-          echo "QEMU static binary found"
-        else
-          echo "Warning: QEMU static binary not found (multi-arch build might fail)"
-        fi
       
       - echo "Configuring Buildah storage..."
       - mkdir -p /etc/containers
@@ -31,6 +25,7 @@ phases:
       - echo "Buildah storage configured"
 
   pre_build:
+    on-failure: ABORT
     commands:
       - echo "=== PRE-BUILD PHASE ==="
       - echo "Verifying CodeBuild environment (codebuild-buildah)..."
@@ -66,21 +61,25 @@ phases:
           echo "WARNING: Could not verify codebuild-buildah image in ECR"
         fi
       - |
-        set -e
-        echo "Pulling base Node.js image (base-image-node22) for ARM64..."
-        if ! buildah pull --platform linux/arm64 "${BASE_IMAGE_URI}"; then
-          echo "ERROR: Failed to pull base image ${BASE_IMAGE_URI} for ARM64"
-          echo "Attempting to pull with latest tag..."
-          LATEST_BASE_URI="${ECR_REGISTRY}/image-base:latest"
-          if ! buildah pull --platform linux/arm64 "${LATEST_BASE_URI}"; then
-            echo "ERROR: Failed to pull base image with latest tag"
-            exit 1
-          fi
-          echo "Using latest tag for base image"
-          BASE_IMAGE_URI="${LATEST_BASE_URI}"
-          export BASE_IMAGE_URI
+        #!/usr/bin/env bash
+        set +e
+        echo "Pulling base Node.js image (base-image-node22)..."
+        echo "URI: ${BASE_IMAGE_URI}"
+        
+        if buildah pull "${BASE_IMAGE_URI}"; then
+            echo "Base image pulled successfully (auto-detected platform)"
+        else
+            echo "WARNING: Failed to pull base image. Retrying with explicit ARM64 platform..."
+            if buildah pull --platform linux/arm64 "${BASE_IMAGE_URI}"; then
+                echo "Base image pulled successfully with --platform linux/arm64"
+            else
+                echo "ERROR: Failed to pull base image ${BASE_IMAGE_URI}"
+                echo "Listing available images in ECR for debugging:"
+                aws ecr list-images --repository-name image-base --region "${AWS_DEFAULT_REGION}"
+                exit 1
+            fi
         fi
-        echo "Base image (base-image-node22) pulled successfully for ARM64"
+        set -e
       - |
         set -e
         if [ -n "${CODEBUILD_RESOLVED_SOURCE_VERSION}" ]; then
@@ -93,6 +92,7 @@ phases:
         echo "Image tag: ${IMAGE_TAG}"
 
   build:
+    on-failure: ABORT
     commands:
       - echo "=== BUILD PHASE ==="
       - echo "Building application image using"
@@ -128,10 +128,24 @@ phases:
         set -e
         echo "Building image with buildah for ARM64..."
         echo "Using base-image-node22 and application code from ./code"
-        buildah bud --platform linux/arm64 \
+        echo "Base image: ${BASE_IMAGE_URI}"
+        echo "Target image: ${REPOSITORY_URI}:server"
+        echo "Dockerfile location: ./code/Dockerfile"
+        echo "Build context: ./code"
+        
+        # Verify Dockerfile exists
+        if [ ! -f ./code/Dockerfile ]; then
+          echo "ERROR: Dockerfile not found at ./code/Dockerfile"
+          exit 1
+        fi
+        
+        # Build the image
+        buildah bud --platform linux/arm64 --isolation oci \
           --build-arg BASE_IMAGE="${BASE_IMAGE_URI}" \
           -t "${REPOSITORY_URI}:server" \
           -f ./code/Dockerfile ./code
+        
+        echo "✅ Build completed successfully"
       - |
         set -e
         echo "Creating additional tags..."
@@ -141,12 +155,17 @@ phases:
         set -e
         echo "Built images:"
         if ! buildah images | grep -q "${REPOSITORY_URI}"; then
-          echo "No images found"
+          echo "ERROR: No images found for ${REPOSITORY_URI}"
+          echo "Available images:"
+          buildah images
+          exit 1
         else
           buildah images | grep "${REPOSITORY_URI}"
+          echo "✅ Image built successfully: ${REPOSITORY_URI}:server"
         fi
 
   post_build:
+    on-failure: ABORT
     commands:
       - echo "=== POST-BUILD PHASE ==="
       - |
@@ -179,63 +198,4 @@ phases:
         set -e
         echo "Pushing commit hash tag: ${IMAGE_TAG}"
         buildah push "${REPOSITORY_URI}:${IMAGE_TAG}"
-      - echo "=== DEPLOYMENT PHASE ==="
-      - |
-        set -e
-        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-        export AWS_ACCOUNT_ID
-        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-        REPOSITORY_URI="${ECR_REGISTRY}/image-services"
-        
-        echo "Deploying to EC2 instance 'server'..."
-        INSTANCE_ID=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=server" "Name=instance-state-name,Values=running" \
-          --region "${AWS_DEFAULT_REGION}" \
-          --query 'Reservations[0].Instances[0].InstanceId' \
-          --output text 2>/dev/null || echo "")
-        
-        if [ -n "${INSTANCE_ID}" ] && [ "${INSTANCE_ID}" != "None" ]; then
-          echo "Found running instance: ${INSTANCE_ID}"
-          
-          # Deploy using the update script on the instance
-          echo "Triggering update script via SSM..."
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "${INSTANCE_ID}" \
-            --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"/opt/update-container.sh ${REPOSITORY_URI} server\"]" \
-            --region "${AWS_DEFAULT_REGION}" \
-            --query 'Command.CommandId' --output text)
-            
-          echo "SSM Command ID: ${COMMAND_ID}"
-          
-          # Wait for execution (simple wait loop)
-          echo "Waiting for deployment to complete..."
-          sleep 15
-          
-          STATUS=$(aws ssm get-command-invocation \
-            --command-id "${COMMAND_ID}" \
-            --instance-id "${INSTANCE_ID}" \
-            --region "${AWS_DEFAULT_REGION}" \
-            --query 'Status' --output text)
-            
-          echo "Deployment Status: ${STATUS}"
-          
-          if [ "${STATUS}" != "Success" ]; then
-             # Fetch details if not success immediately visible (or pending)
-             aws ssm get-command-invocation \
-              --command-id "${COMMAND_ID}" \
-              --instance-id "${INSTANCE_ID}" \
-              --region "${AWS_DEFAULT_REGION}" \
-              --query 'StandardErrorContent' --output text
-          else
-             aws ssm get-command-invocation \
-              --command-id "${COMMAND_ID}" \
-              --instance-id "${INSTANCE_ID}" \
-              --region "${AWS_DEFAULT_REGION}" \
-              --query 'StandardOutputContent' --output text
-          fi
-          
-        else
-          echo "WARNING: No running 'server' instance found. Skipping deployment."
-        fi
 

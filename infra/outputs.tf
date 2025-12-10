@@ -24,6 +24,6 @@ output "ec2_instance_id" {
 }
 
 output "ecr_repo_url" {
-  description = "The URL of the ECR repository"
-  value       = module.cicd.ecr_repository_url
+  description = "The URL of the application ECR repository"
+  value       = module.ecr.app_repo_url
 }

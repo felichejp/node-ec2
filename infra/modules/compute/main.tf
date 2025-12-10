@@ -1,5 +1,4 @@
 data "aws_ami" "amazon_linux_2023" {
-  count       = var.custom_ami_id == "" ? 1 : 0
   most_recent = true
   owners      = ["amazon"]
 
@@ -7,10 +6,6 @@ data "aws_ami" "amazon_linux_2023" {
     name   = "name"
     values = ["al2023-ami-*-arm64"]
   }
-}
-
-locals {
-  ami_id = var.custom_ami_id != "" ? var.custom_ami_id : data.aws_ami.amazon_linux_2023[0].id
 }
 
 resource "aws_security_group" "server_sg" {
@@ -22,30 +17,6 @@ resource "aws_security_group" "server_sg" {
     description = "HTTP"
     from_port   = 80
     to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "HTTPS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "Application port"
-    from_port   = 8080
-    to_port     = 8080
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -114,7 +85,7 @@ module "ec2_instance" {
 
   name = var.instance_name
 
-  ami                    = local.ami_id
+  ami                    = data.aws_ami.amazon_linux_2023.id
   instance_type          = var.instance_type
   subnet_id              = var.subnet_id
   vpc_security_group_ids = [aws_security_group.server_sg.id]
@@ -135,10 +106,9 @@ module "ec2_instance" {
     #!/bin/bash
     set -e
     
-    echo "=== Preparing EC2 instance ==="
+    echo "=== Bootstrapping EC2 instance ==="
     
-    # Expand filesystem if volume was resized
-    echo "Checking and expanding filesystem if needed..."
+    # 1. Expand filesystem
     if command -v growpart > /dev/null 2>&1; then
       growpart /dev/nvme0n1 1 || true
       if command -v xfs_growfs > /dev/null 2>&1; then
@@ -148,88 +118,34 @@ module "ec2_instance" {
       fi
     fi
     
-    # Update system
+    # 2. Update & Install dependencies
     dnf update -y || yum update -y
+    dnf install -y podman amazon-ssm-agent || yum install -y podman amazon-ssm-agent
     
-    # Verify SSM Agent is running (should be preinstalled in custom AMI)
-    echo "Verifying SSM Agent..."
-    if ! systemctl is-active --quiet amazon-ssm-agent; then
-      echo "SSM Agent not running, installing..."
-      dnf install -y amazon-ssm-agent || yum install -y amazon-ssm-agent || true
-      systemctl enable amazon-ssm-agent
-      systemctl start amazon-ssm-agent
-    else
-      echo "SSM Agent is running"
-    fi
+    # Enable Podman socket (optional, good for Docker API compatibility)
+    systemctl enable podman.socket
+    systemctl start podman.socket
     
-    # Verify Docker is installed and running (should be preinstalled in custom AMI)
-    echo "Verifying Docker..."
-    if ! command -v docker > /dev/null 2>&1; then
-      echo "Docker not found, installing..."
-      dnf install -y docker || yum install -y docker
-      systemctl enable docker
-      systemctl start docker
-      sleep 5
-    fi
+    systemctl enable amazon-ssm-agent
+    systemctl start amazon-ssm-agent
     
-    # Ensure Docker service is running
-    if ! systemctl is-active --quiet docker; then
-      echo "Starting Docker service..."
-      systemctl enable docker
-      systemctl start docker
-      sleep 5
-    fi
+    # 3. Create update-container script
+    cat > /opt/update-container.sh <<'SCRIPT_EOF'
+    ${file("${path.module}/update-container.sh")}
+    SCRIPT_EOF
     
-    # Verify Docker is working
-    if systemctl is-active --quiet docker; then
-      echo "Docker is running"
-      docker --version || echo "Docker version check failed"
-    else
-      echo "Warning: Docker service may not be running"
-    fi
+    chmod +x /opt/update-container.sh
     
-    # Ensure ec2-user is in docker group
-    if getent group docker > /dev/null 2>&1; then
-      usermod -a -G docker ec2-user || true
-    fi
-    
-    echo "=== Logging into ECR ==="
+    # 4. Initial Run
+    echo "=== Running initial deployment ==="
     AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
     AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
-    ECR_REGISTRY=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+    ECR_REGISTRY="$${AWS_ACCOUNT_ID}.dkr.ecr.$${AWS_REGION}.amazonaws.com"
+    REPO_URI="$${ECR_REGISTRY}/image-services"
     
-    # Login to ECR
-    aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY || \
-    aws ecr get-login-password --region $AWS_REGION | podman login --username AWS --password-stdin $ECR_REGISTRY
+    /opt/update-container.sh "$REPO_URI" "server"
     
-    echo "=== Pulling and running container ==="
-    REPOSITORY_URI=$ECR_REGISTRY/image-services
-    
-    # Pull the server image
-    echo "Pulling image: $REPOSITORY_URI:server"
-    docker pull $REPOSITORY_URI:server || podman pull $REPOSITORY_URI:server
-    
-    # Stop and remove existing container if it exists
-    docker stop service-app || podman stop service-app || true
-    docker rm service-app || podman rm service-app || true
-    
-    # Run the container
-    echo "Starting container..."
-    docker run -d \
-      -p 80:8080 \
-      -p 8080:8080 \
-      --name service-app \
-      --restart unless-stopped \
-      $REPOSITORY_URI:server || \
-    podman run -d \
-      -p 80:8080 \
-      -p 8080:8080 \
-      --name service-app \
-      --restart unless-stopped \
-      $REPOSITORY_URI:server
-    
-    echo "=== Container deployment completed ==="
-    docker ps || podman ps
+    echo "=== Bootstrap completed ==="
   EOF
   )
 

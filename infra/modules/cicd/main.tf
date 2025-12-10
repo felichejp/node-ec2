@@ -1,169 +1,3 @@
-# S3 Resources
-resource "aws_s3_bucket" "this" {
-  bucket        = var.bucket_name
-  force_destroy = true
-}
-
-resource "aws_s3_bucket_versioning" "this" {
-  bucket = aws_s3_bucket.this.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_ownership_controls" "this" {
-  bucket = aws_s3_bucket.this.id
-  rule {
-    object_ownership = "BucketOwnerEnforced"
-  }
-}
-
-resource "aws_s3_bucket_notification" "bucket_notification" {
-  bucket      = aws_s3_bucket.this.id
-  eventbridge = true
-}
-
-resource "aws_s3_object" "folders" {
-  for_each = toset(var.folders)
-
-  bucket  = aws_s3_bucket.this.id
-  key     = each.value
-  content = ""
-}
-
-# ECR Resources
-resource "aws_ecr_repository" "app_repo" {
-  name                 = "image-services"
-  image_tag_mutability = "MUTABLE"
-  force_delete         = true
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  tags = {
-    Environment = "production"
-    Type        = "application"
-    TERRAFORM   = "true"
-  }
-}
-
-resource "aws_ecr_lifecycle_policy" "app_repo_policy" {
-  repository = aws_ecr_repository.app_repo.name
-
-  policy = jsonencode({
-    rules = [
-      {
-        rulePriority = 1
-        description  = "Keep last 20 images"
-        selection = {
-          tagStatus   = "any"
-          countType   = "imageCountMoreThan"
-          countNumber = 20
-        }
-        action = {
-          type = "expire"
-        }
-      }
-    ]
-  })
-}
-
-resource "aws_ecr_repository" "base_repo" {
-  name                 = "image-base"
-  image_tag_mutability = "MUTABLE"
-  force_delete         = true
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  tags = {
-    Environment = "production"
-    Type        = "base-image"
-    TERRAFORM   = "true"
-  }
-}
-
-resource "aws_ecr_lifecycle_policy" "base_repo_policy" {
-  repository = aws_ecr_repository.base_repo.name
-
-  policy = jsonencode({
-    rules = [
-      {
-        rulePriority = 1
-        description  = "Keep only 1 untagged image"
-        selection = {
-          tagStatus   = "untagged"
-          countType   = "imageCountMoreThan"
-          countNumber = 1
-        }
-        action = {
-          type = "expire"
-        }
-      }
-    ]
-  })
-}
-
-# EC2 Instance Role for ECR Access
-resource "aws_iam_role" "ec2_instance_role" {
-  name = "node-backend-ec2-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      }
-    ]
-  })
-}
-
-resource "aws_iam_role_policy" "ec2_ecr_policy" {
-  name = "ec2-ecr-policy"
-  role = aws_iam_role.ec2_instance_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "ecr:GetAuthorizationToken",
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:GetDownloadUrlForLayer",
-          "ecr:BatchGetImage"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ec2_ssm_policy" {
-  role       = aws_iam_role.ec2_instance_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_instance_profile" "ec2_instance_profile" {
-  name = "node-backend-ec2-profile"
-  role = aws_iam_role.ec2_instance_role.name
-}
-
 # CodeBuild IAM Role
 resource "aws_iam_role" "codebuild_role" {
   name = "codebuild-role"
@@ -206,8 +40,8 @@ resource "aws_iam_role_policy" "codebuild_policy" {
           "s3:PutObject"
         ]
         Resource = [
-          aws_s3_bucket.this.arn,
-          "${aws_s3_bucket.this.arn}/*"
+          var.bucket_arn,
+          "${var.bucket_arn}/*"
         ]
       },
       {
@@ -252,13 +86,6 @@ resource "aws_iam_role_policy" "codebuild_policy" {
           "ssm:ListCommandInvocations"
         ]
         Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "iam:PassRole"
-        ]
-        Resource = aws_iam_role.ec2_instance_role.arn
       }
     ]
   })
@@ -277,7 +104,7 @@ resource "aws_codebuild_project" "this" {
 
   environment {
     compute_type                = "BUILD_GENERAL1_SMALL"
-    image                       = "${aws_ecr_repository.base_repo.repository_url}:codebuild-buildah"
+    image                       = "${var.base_repo_url}:codebuild-buildah"
     type                        = "ARM_CONTAINER"
     image_pull_credentials_type = "SERVICE_ROLE"
     privileged_mode             = true # Required for Buildah in CodeBuild
@@ -324,8 +151,8 @@ resource "aws_iam_role_policy" "codepipeline_policy" {
           "s3:PutObject"
         ]
         Resource = [
-          aws_s3_bucket.this.arn,
-          "${aws_s3_bucket.this.arn}/*"
+          var.bucket_arn,
+          "${var.bucket_arn}/*"
         ]
       },
       {
@@ -383,7 +210,7 @@ resource "aws_codepipeline" "pipeline" {
   role_arn = aws_iam_role.codepipeline_role.arn
 
   artifact_store {
-    location = aws_s3_bucket.this.id
+    location = var.bucket_id
     type     = "S3"
   }
 
@@ -399,8 +226,8 @@ resource "aws_codepipeline" "pipeline" {
       output_artifacts = ["source_output"]
 
       configuration = {
-        S3Bucket             = aws_s3_bucket.this.id
-        S3ObjectKey          = "server/server.zip" # Updated to match workflow zip name
+        S3Bucket             = var.bucket_id
+        S3ObjectKey          = "server/server.zip"
         PollForSourceChanges = "false"
       }
     }
@@ -435,7 +262,7 @@ resource "aws_cloudwatch_event_rule" "s3_change" {
     detail-type = ["Object Created"]
     detail = {
       bucket = {
-        name = [aws_s3_bucket.this.id]
+        name = [var.bucket_id]
       }
       object = {
         key = [{ prefix = "server/" }]

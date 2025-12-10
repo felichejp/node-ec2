@@ -77,9 +77,3 @@ variable "folders" {
   type        = list(string)
   default     = ["images/", "logs/"]
 }
-
-variable "custom_ami_id" {
-  description = "Optional custom AMI ID with Docker preinstalled. If empty, uses default Amazon Linux 2023 ARM64 AMI"
-  type        = string
-  default     = ""
-}

@@ -4,32 +4,17 @@ phases:
   install:
     commands:
       - echo "=== INSTALL PHASE ==="
-      - echo "Using sh (dash) for buildspec execution"
-      - echo "Verifying Buildah installation..."
+      - echo "Environment: Amazon Linux 2023 (Custom Image)"
+      - echo "Verifying tools..."
       - buildah --version
-      - echo "Installing qemu-user-static for cross-arch emulation..."
+      - aws --version
       - |
-        set -e
-        if command -v apt-get >/dev/null 2>&1; then
-          apt-get update || true
-          apt-get install -y qemu-user-static binfmt-support || true
-          if [ -f /usr/bin/qemu-aarch64-static ]; then
-            cp /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64-static.bak || true
-          fi
-        elif command -v dnf >/dev/null 2>&1; then
-          dnf install -y qemu-user-static || true
-        elif command -v yum >/dev/null 2>&1; then
-          yum install -y qemu-user-static || true
-        fi
-        if command -v update-binfmts >/dev/null 2>&1; then
-          update-binfmts --enable qemu-aarch64 || true
-        fi
-        if [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
-          echo "QEMU ARM64 emulation is enabled"
+        if [ -f /usr/bin/qemu-aarch64-static ]; then
+          echo "QEMU static binary found"
         else
-          echo "Warning: QEMU ARM64 emulation may not be properly configured"
+          echo "Warning: QEMU static binary not found (multi-arch build might fail)"
         fi
-      - echo "qemu-user-static installation completed"
+      
       - echo "Configuring Buildah storage..."
       - mkdir -p /etc/containers
       - |
@@ -200,142 +185,57 @@ phases:
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         export AWS_ACCOUNT_ID
         ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-        export ECR_REGISTRY
         REPOSITORY_URI="${ECR_REGISTRY}/image-services"
-        export REPOSITORY_URI
         
-        echo "Looking for existing EC2 instance named 'server'..."
+        echo "Deploying to EC2 instance 'server'..."
         INSTANCE_ID=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=server" "Name=instance-state-name,Values=running,stopped,stopping" \
+          --filters "Name=tag:Name,Values=server" "Name=instance-state-name,Values=running" \
           --region "${AWS_DEFAULT_REGION}" \
           --query 'Reservations[0].Instances[0].InstanceId' \
           --output text 2>/dev/null || echo "")
         
-        if [ -n "${INSTANCE_ID}" ] && [ "${INSTANCE_ID}" != "None" ] && [ "${INSTANCE_ID}" != "null" ] && [ "${INSTANCE_ID}" != "none" ]; then
-          echo "Found existing instance: ${INSTANCE_ID}"
+        if [ -n "${INSTANCE_ID}" ] && [ "${INSTANCE_ID}" != "None" ]; then
+          echo "Found running instance: ${INSTANCE_ID}"
           
-          # Wait for instance to be running
-          INSTANCE_STATE=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'Reservations[0].Instances[0].State.Name' --output text)
-          if [ "${INSTANCE_STATE}" = "stopped" ]; then
-            echo "Starting stopped instance..."
-            aws ec2 start-instances --instance-ids "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}"
-            aws ec2 wait instance-running --instance-ids "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}"
-            sleep 30
-          fi
-          
-          # Wait for SSM
-          echo "Waiting for SSM to be ready..."
-          i=1
-          while [ $i -le 30 ]; do
-            SSM_STATUS=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "Offline")
-            if [ "${SSM_STATUS}" = "Online" ]; then
-              echo "SSM is ready"
-              break
-            fi
-            echo "Waiting for SSM... ($i/30)"
-            sleep 5
-            i=$((i + 1))
-          done
-          
-          # Install container runtime
-          echo "Preparing instance for containers..."
-          PREPARE_ID=$(aws ssm send-command \
+          # Deploy using the update script on the instance
+          echo "Triggering update script via SSM..."
+          COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["dnf install -y docker", "systemctl enable docker", "systemctl start docker", "sleep 5", "usermod -a -G docker ec2-user || true"]' \
+            --parameters "commands=[\"/opt/update-container.sh ${REPOSITORY_URI} server\"]" \
             --region "${AWS_DEFAULT_REGION}" \
             --query 'Command.CommandId' --output text)
+            
+          echo "SSM Command ID: ${COMMAND_ID}"
+          
+          # Wait for execution (simple wait loop)
+          echo "Waiting for deployment to complete..."
           sleep 15
-          PREPARE_OUTPUT=$(aws ssm get-command-invocation --command-id "${PREPARE_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
-          PREPARE_ERROR=$(aws ssm get-command-invocation --command-id "${PREPARE_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
-          if [ -n "${PREPARE_ERROR}" ]; then
-            echo "Prepare command errors: ${PREPARE_ERROR}"
-          fi
-          echo "Docker installation output: ${PREPARE_OUTPUT}"
           
-          # Login to ECR
-          echo "Logging into ECR on instance..."
-          ECR_LOGIN_CMD="AWS_ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text); ECR_REGISTRY=\${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com; aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin \${ECR_REGISTRY}"
-          ECR_LOGIN_ID=$(aws ssm send-command \
-            --instance-ids "${INSTANCE_ID}" \
-            --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"${ECR_LOGIN_CMD}\"]" \
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${INSTANCE_ID}" \
             --region "${AWS_DEFAULT_REGION}" \
-            --query 'Command.CommandId' --output text)
-          sleep 5
-          ECR_LOGIN_OUTPUT=$(aws ssm get-command-invocation --command-id "${ECR_LOGIN_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
-          ECR_LOGIN_ERROR=$(aws ssm get-command-invocation --command-id "${ECR_LOGIN_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
-          if [ -n "${ECR_LOGIN_ERROR}" ]; then
-            echo "ECR login errors: ${ECR_LOGIN_ERROR}"
-          fi
-          echo "ECR login output: ${ECR_LOGIN_OUTPUT}"
+            --query 'Status' --output text)
+            
+          echo "Deployment Status: ${STATUS}"
           
-          # Stop and remove old container
-          echo "Stopping old container..."
-          STOP_ID=$(aws ssm send-command \
-            --instance-ids "${INSTANCE_ID}" \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["docker stop service-app || true", "docker rm service-app || true"]' \
-            --region "${AWS_DEFAULT_REGION}" \
-            --query 'Command.CommandId' --output text)
-          sleep 5
-          STOP_OUTPUT=$(aws ssm get-command-invocation --command-id "${STOP_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
-          echo "Stop container output: ${STOP_OUTPUT}"
-          
-          # Pull latest image
-          echo "Pulling latest server image..."
-          PULL_ID=$(aws ssm send-command \
-            --instance-ids "${INSTANCE_ID}" \
-            --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"df -h\", \"docker system prune -af --volumes || true\", \"docker image prune -af || true\", \"df -h\", \"docker pull ${REPOSITORY_URI}:server\"]" \
-            --region "${AWS_DEFAULT_REGION}" \
-            --query 'Command.CommandId' --output text)
-          sleep 20
-          PULL_OUTPUT=$(aws ssm get-command-invocation --command-id "${PULL_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
-          PULL_ERROR=$(aws ssm get-command-invocation --command-id "${PULL_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
-          if [ -n "${PULL_ERROR}" ]; then
-            echo "Pull errors: ${PULL_ERROR}"
-          fi
-          echo "Pull output: ${PULL_OUTPUT}"
-          
-          # Start new container
-          echo "Starting new container..."
-          START_ID=$(aws ssm send-command \
-            --instance-ids "${INSTANCE_ID}" \
-            --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"docker run -d -p 80:8080 -p 8080:8080 --name service-app --restart unless-stopped ${REPOSITORY_URI}:server\"]" \
-            --region "${AWS_DEFAULT_REGION}" \
-            --query 'Command.CommandId' --output text)
-          sleep 5
-          START_OUTPUT=$(aws ssm get-command-invocation --command-id "${START_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
-          START_ERROR=$(aws ssm get-command-invocation --command-id "${START_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
-          if [ -n "${START_ERROR}" ]; then
-            echo "Start errors: ${START_ERROR}"
-          fi
-          echo "Start output: ${START_OUTPUT}"
-          
-          # Verify container
-          echo "Verifying container..."
-          VERIFY_ID=$(aws ssm send-command \
-            --instance-ids "${INSTANCE_ID}" \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["docker ps | grep service-app || echo No container found", "docker logs --tail 10 service-app || echo No logs available"]' \
-            --region "${AWS_DEFAULT_REGION}" \
-            --query 'Command.CommandId' --output text)
-          sleep 5
-          VERIFY_OUTPUT=$(aws ssm get-command-invocation --command-id "${VERIFY_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
-          VERIFY_ERROR=$(aws ssm get-command-invocation --command-id "${VERIFY_ID}" --instance-id "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'StandardErrorContent' --output text 2>/dev/null || echo "")
-          echo "Container status: ${VERIFY_OUTPUT}"
-          if [ -n "${VERIFY_ERROR}" ]; then
-            echo "Verify errors: ${VERIFY_ERROR}"
+          if [ "${STATUS}" != "Success" ]; then
+             # Fetch details if not success immediately visible (or pending)
+             aws ssm get-command-invocation \
+              --command-id "${COMMAND_ID}" \
+              --instance-id "${INSTANCE_ID}" \
+              --region "${AWS_DEFAULT_REGION}" \
+              --query 'StandardErrorContent' --output text
+          else
+             aws ssm get-command-invocation \
+              --command-id "${COMMAND_ID}" \
+              --instance-id "${INSTANCE_ID}" \
+              --region "${AWS_DEFAULT_REGION}" \
+              --query 'StandardOutputContent' --output text
           fi
           
-          PUBLIC_IP=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --region "${AWS_DEFAULT_REGION}" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-          echo "Deployment completed!"
-          echo "Instance: ${INSTANCE_ID}"
-          echo "Public IP: ${PUBLIC_IP}"
-          echo "Application: http://${PUBLIC_IP}:80 and http://${PUBLIC_IP}:8080"
         else
-          echo "No existing instance found. Instance should be created by Terraform."
+          echo "WARNING: No running 'server' instance found. Skipping deployment."
         fi
 

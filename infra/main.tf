@@ -13,18 +13,6 @@ module "networking" {
   database_subnets = var.database_subnets
 }
 
-# module "database" {
-#   source = "./modules/database"
-
-#   vpc_id         = module.networking.vpc_id
-#   vpc_cidr_block = module.networking.vpc_cidr_block
-#   subnets        = module.networking.database_subnets
-
-#   snapshot_identifier = var.snapshot_identifier
-#   db_username         = var.db_username
-#   db_password         = var.db_password
-# }
-
 module "compute" {
   source = "./modules/compute"
 
@@ -32,12 +20,23 @@ module "compute" {
   instance_type = "t4g.small"
   subnet_id     = module.networking.public_subnets[0]
   vpc_id        = module.networking.vpc_id
-  custom_ami_id  = var.custom_ami_id
+}
+
+module "s3" {
+  source = "./modules/s3"
+
+  bucket_name = var.bucket_name
+  folders     = var.folders
+}
+
+module "ecr" {
+  source = "./modules/ecr"
 }
 
 module "cicd" {
   source = "./modules/cicd"
 
-  bucket_name = var.bucket_name
-  folders     = var.folders
+  bucket_id     = module.s3.bucket_id
+  bucket_arn    = module.s3.bucket_arn
+  base_repo_url = module.ecr.base_repo_url
 }

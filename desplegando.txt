@@ -1,3 +1,0 @@
-Solo me interesa probar el módulo CICD
-Me interesa probar desde github el CICD con actions y tags
-Para evitar costos de la infra no quiero instalar el módulo de base de datos o culaquier infraestructura innecesaria 

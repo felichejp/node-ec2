@@ -17,9 +17,3 @@ variable "vpc_id" {
   type        = string
   description = "The VPC ID where the security group will be created"
 }
-
-variable "custom_ami_id" {
-  type        = string
-  default     = ""
-  description = "Optional custom AMI ID. If provided, this AMI will be used instead of the default Amazon Linux 2023 AMI"
-}

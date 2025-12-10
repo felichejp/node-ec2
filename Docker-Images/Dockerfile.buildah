@@ -1,4 +1,4 @@
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023
+FROM public.ecr.aws/docker/library/fedora:latest
 
 RUN dnf update -y && \
     dnf install -y buildah fuse-overlayfs git unzip qemu-user-static && \
